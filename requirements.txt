@@ -1,5 +1,4 @@
 streamlit
 pandas
 openpyxl
-webdriver-manager
-selenium>=4.15
+playwright
