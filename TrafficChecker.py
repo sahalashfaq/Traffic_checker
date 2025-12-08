@@ -1,8 +1,29 @@
 import streamlit as st
 import pandas as pd
-from seleniumbase import Driver
-from selenium.webdriver.common.by import By
 import time
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from webdriver_manager.chrome import ChromeDriverManager
+
+# ====================== FORCE INSTALL CHROME ON STREAMLIT CLOUD ======================
+import os
+import sys
+
+# This runs only once when the container starts
+if os.getenv("IS_STREAMLIT_CLOUD", "0") == "0":
+    os.environ["IS_STREAMLIT_CLOUD"] = "1"
+    st.toast("Installing Chrome for the first time (takes ~60 seconds)...")
+    os.system("apt-get update && apt-get install -y wget gnupg")
+    os.system("wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add -")
+    os.system('sh -c "echo deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main > /etc/apt/sources.list.d/google-chrome.list"')
+    os.system("apt-get update && apt-get install -y google-chrome-stable")
+
+# ============================== STREAMLIT APP ==============================
+st.set_page_config(page_title="Bulk Traffic Checker", layout="centered")
+
+# Your beautiful CSS (unchanged)
 st.markdown('''<style>
             @import url('https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap');
 
@@ -403,137 +424,98 @@ st.markdown('''<style>
                 text-decoration: underline;
             }
             </style>''', unsafe_allow_html=True)
-st.set_page_config(page_title="Bulk Traffic Checker", layout="centered")
-st.markdown("<p class='h1'>Bulk Traffic Checker</p><p>Get the Website Traffic Information in Bulk From Ahref.</p>", unsafe_allow_html=True)
 
-# --- Settings ---
+
+st.markdown("<p class='h1'>Bulk Traffic Checker</p><p>Get the Website Traffic Information in Bulk From Ahrefs.</p>", unsafe_allow_html=True)
+
 col1, col2 = st.columns(2)
 with col1:
-    timeout = st.number_input("Safety timeout per domain (seconds)", 40, 180, 70, 10)
+    timeout_per_domain = st.number_input("Safety timeout per domain (seconds)", 40, 180, 70, 10)
 with col2:
-    mode = st.selectbox("Mode", ["Headless (Fastest)", "Visible (debug)"], index=0)
+    mode = st.selectbox("Mode", ["Headless (Fastest)", "Headful (Debug)"], index=0)
 
 headless = (mode == "Headless (Fastest)")
 
-uploaded_file = st.file_uploader("Upload CSV/XLSX with domains", type=["csv", "xlsx"])
+uploaded_file = st.file_uploader("Upload CSV/XLSX with domains (one column)", type=["csv", "xlsx"])
 
 if uploaded_file:
     df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
     st.dataframe(df.head(10), use_container_width=True)
 
-    domain_col = st.selectbox("Column with Websites URLs", df.columns)
+    domain_col = st.selectbox("Select column containing domains", df.columns)
 
     if st.button("Start Extraction", type="secondary"):
-
         results = []
-        progress = st.progress(0)
-        status = st.empty()
-        table = st.empty()
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        results_table = st.empty()
 
-        driver = Driver(uc=True, headless=headless, incognito=True, disable_gpu=True)
+        # ====== Chrome options that work on Streamlit Cloud ======
+        chrome_options = Options()
+        if headless:
+            chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option("useAutomationExtension", False)
+
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => false});")
 
         try:
             for idx, domain in enumerate(df[domain_col].dropna(), 1):
+                domain = str(domain).strip().lower().replace("http://", "").replace("https://", "").split("/")[0]
                 row = {"Domain": domain}
-                status.markdown(f"<p class='p'>({idx} / {len(df)}): <strong>{domain}</strong></p>",unsafe_allow_html=True)
+                status_text.markdown(f"**({idx}/{len(df)})** → `{domain}`")
 
-                success = False
-                for attempt in range(3):  # Retry up to 3 times per domain
+                try:
+                    driver.get(f"https://ahrefs.com/traffic-checker/?input={domain}&mode=domain")
+                    time.sleep(3)
+
+                    # Click "Check traffic" if button exists
                     try:
-                        # Open Ahrefs with reconnect
-                        driver.uc_open_with_reconnect(
-                            f"https://ahrefs.com/traffic-checker/?input={domain}&mode=domain",
-                            reconnect_time=5
-                        )
+                        btn = driver.find_element(By.XPATH, "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'check traffic')]")
+                        driver.execute_script("arguments[0].click();", btn)
+                        time.sleep(2)
+                    except:
+                        pass
 
-                        # Click "Check traffic" if present
-                        try:
-                            btn = driver.find_element(By.XPATH, "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'check traffic')]")
-                            driver.execute_script("arguments[0].click();", btn)
-                            time.sleep(1.5)
-                        except:
-                            pass
+                    # Wait for results modal
+                    driver.implicitly_wait(20)
+                    driver.find_element(By.XPATH, "//div[contains(@class,'ReactModalPortal')]//h2")
 
-                        # Enhanced Cloudflare handling
-                        if not any(c["name"] == "cf_clearance" for c in driver.get_cookies()):
-                            cf_start = time.time()
-                            while time.time() - cf_start < 40:  # Longer timeout
-                                try:
-                                    # Explicitly check for CAPTCHA iframe
-                                    captcha_iframe = driver.find_elements(By.CSS_SELECTOR, "iframe[src*='challenges.cloudflare.com']")
-                                    if captcha_iframe:
-                                        driver.switch_to.frame(captcha_iframe[0])
-                                        checkbox = driver.find_element(By.ID, "cf-chl-widget-0")  # Common CAPTCHA checkbox ID
-                                        driver.execute_script("arguments[0].click();", checkbox)
-                                        driver.switch_to.default_content()
-                                    else:
-                                        driver.uc_gui_click_captcha()  # Fallback to built-in
-                                except:
-                                    pass
-                                
-                                if any(c["name"] == "cf_clearance" for c in driver.get_cookies()):
-                                    break
-                                time.sleep(0.8)  # Tighter loop for faster detection
+                    traffic = driver.find_element(By.XPATH, "//span[contains(text(),'K') or contains(text(),'M') or contains(text(),'B')]").text
+                    value = driver.find_element(By.XPATH, "//span[starts-with(text(),'$')]").text
+                    top_country = driver.find_element(By.XPATH, "(//table)[1]//tr[1]//td[1]").text
+                    top_keyword = driver.find_element(By.XPATH, "(//table)[2]//tr[1]//td[1]").text
 
-                            if not any(c["name"] == "cf_clearance" for c in driver.get_cookies()):
-                                if headless:
-                                    st.warning(f"CAPTCHA unsolved in headless mode for {domain}. Try visible mode.")
-                                    break
-                                else:
-                                    st.info(f"Manual CAPTCHA may be needed for {domain}. Solve it in the browser window.")
-                                    time.sleep(10)  # Give time for manual solve
-
-                        # Wait for modal title (data indicator)
-                        driver.wait_for_element_visible("//div[contains(@class,'ReactModalPortal')]//h2", timeout=20)
-
-                        # Extract data
-                        website = driver.find_element(By.XPATH, "//div[contains(@class,'ReactModalPortal')]//h2").text.strip()
-
-                        traffic = driver.find_element(By.XPATH, 
-                            "//div[contains(@class,'ReactModalPortal')]//span[contains(text(),'K') or contains(text(),'M') or contains(text(),'B')]"
-                        ).text.strip()
-
-                        value = driver.find_element(By.XPATH, 
-                            "//div[contains(@class,'ReactModalPortal')]//span[starts-with(text(),'$')]"
-                        ).text.strip()
-
-                        top_country = driver.find_element(By.XPATH, "(//div[contains(@class,'ReactModalPortal')]//table)[1]//tr[1]//td[1]").text.strip()
-                        top_keyword = driver.find_element(By.XPATH, "(//div[contains(@class,'ReactModalPortal')]//table)[2]//tr[1]//td[1]").text.strip()
-
-                        row.update({
-                            "Organic Traffic": traffic,
-                            "Traffic Value": value,
-                            "Top Country": top_country,
-                            "Top Keyword": top_keyword,
-                            "Status": "Success"
-                        })
-                        success = True
-                        break  # Exit retry loop on success
-
-                    except Exception as e:
-                        if attempt == 2:  # Final failure after retries
-                            row.update({
-                                "Organic Traffic": "—",
-                                "Traffic Value": "—",
-                                "Top Country": "—",
-                                "Top Keyword": "—",
-                                "Status": f"Failed Due to CLoudFlare!"
-                            })
+                    row.update({
+                        "Organic Traffic": traffic,
+                        "Traffic Value": value,
+                        "Top Country": top_country,
+                        "Top Keyword": top_keyword,
+                        "Status": "Success"
+                    })
+                except Exception as e:
+                    row.update({
+                        "Organic Traffic": "—",
+                        "Traffic Value": "—",
+                        "Top Country": "—",
+                        "Top Keyword": "—",
+                        "Status": "Failed / Blocked"
+                    })
 
                 results.append(row)
-                progress.progress(idx / len(df))
-                table.dataframe(pd.DataFrame(results), use_container_width=True)
+                progress_bar.progress(idx / len(df))
+                results_table.dataframe(pd.DataFrame(results), use_container_width=True)
 
         finally:
             driver.quit()
 
         st.balloons()
-
-        # Download
-        csv = pd.DataFrame(results).to_csv(index=False).encode('utf-8')
-        st.download_button(
-            "Download Results CSV",
-            data=csv,
-            file_name=f"ahrefs_traffic_{time.strftime('%Y%m%d_%H%M')}.csv",
-            mime="text/csv"
-        )
+        csv = pd.DataFrame(results).to_csv(index=False).encode()
+        st.download_button("Download Results CSV", csv, f"ahrefs_traffic_{time.strftime('%Y%m%d_%H%M')}.csv", "text/csv")
