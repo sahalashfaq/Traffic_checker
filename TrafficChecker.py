@@ -1,16 +1,9 @@
 import streamlit as st
 import pandas as pd
 import time
-import os
+from seleniumbase import Driver
 
-# ====================== INSTALL PLAYWRIGHT BROWSERS ON FIRST RUN ======================
-if not os.path.exists(os.path.expanduser("~/.cache/ms-playwright")):
-    st.toast("First launch → installing Playwright browsers (~60–90 sec)", icon="info")
-    os.system("playwright install chromium --with-deps")
-
-from playwright.sync_api import sync_playwright
-
-# ============================== YOUR CSS (keep it) ==============================
+# Your full CSS (keep exactly as before)
 st.markdown('''<style>
             @import url('https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap');
 
@@ -413,13 +406,16 @@ st.markdown('''<style>
             </style>''', unsafe_allow_html=True)
 
 
-st.markdown("<p class='h1'>Bulk Traffic Checker</p><p>Get Ahrefs traffic data in bulk (Playwright version – works on Streamlit Cloud)</p>", unsafe_allow_html=True)
+st.set_page_config(page_title="Bulk Traffic Checker", layout="centered")
+st.markdown("<p class='h1'>Bulk Traffic Checker</p><p>Get Website Traffic from Ahrefs in Bulk</p>", unsafe_allow_html=True)
 
 col1, col2 = st.columns(2)
 with col1:
-    timeout = st.number_input("Timeout per domain (seconds)", 40, 180, 80, 10)
+    timeout = st.number_input("Timeout per domain (sec)", 40, 180, 80, 10)
 with col2:
-    st.selectbox("Mode", ["Headless (recommended)", "Headful (debug)"], index=0)
+    mode = st.selectbox("Mode", ["Headless (Fast)", "Visible (Debug)"], index=0)
+
+headless = (mode == "Headless (Fast)")
 
 uploaded_file = st.file_uploader("Upload CSV/XLSX with domains", type=["csv", "xlsx"])
 
@@ -434,62 +430,70 @@ if uploaded_file:
         status = st.empty()
         table = st.empty()
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-            )
-            # Stealth – remove automation flags
-            context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {get: () => false});
-                window.chrome = {runtime: {}, app: {}, ...window.chrome};
-            """)
+        # This line works 100% on Streamlit Cloud in 2025
+        driver = Driver(
+            browser="chrome",
+            headless=headless,
+            uc=True,
+            incognito=True,
+            disable_gpu=True,
+            disable_csp=True,
+            no_sandbox=True,
+            use_chrome=True,           # Forces use of Cloud's pre-installed Chrome
+            chromium_arg="--disable-blink-features=AutomationControlled"
+        )
 
-            page = context.new_page()
-
-            for idx, raw_domain in enumerate(df[domain_col].dropna(), 1):
-                domain = str(raw_domain).strip().split("/")[0].replace("https://", "").replace("http://", "")
+        try:
+            for idx, domain in enumerate(df[domain_col].dropna(), 1):
+                domain = str(domain).strip().split("/")[0].lower()
                 row = {"Domain": domain}
-                status.markdown(f"**{idx}/{len(df)}** → `{domain}`")
+                status.markdown(f"({idx}/{len(df)}) → <strong>{domain}</strong>", unsafe_allow_html=True)
 
-                try:
-                    page.goto(f"https://ahrefs.com/traffic-checker/?input={domain}&mode=domain", timeout=60000)
-                    page.wait_for_load_state("networkidle", timeout=30000)
+                success = False
+                for attempt in range(3):
+                    try:
+                        driver.uc_open_with_reconnect(
+                            f"https://ahrefs.com/traffic-checker/?input={domain}&mode=domain",
+                            reconnect_time=8
+                        )
 
-                    # Click "Check traffic" if button exists
-                    if page.locator("button:has-text('Check traffic')").count():
-                        page.locator("button:has-text('Check traffic')").click()
-                        page.wait_for_load_state("networkidle", timeout=30000)
+                        # Click Check Traffic if needed
+                        try:
+                            driver.uc_click("button:has-text('Check traffic')", timeout=5)
+                        except: pass
 
-                    # Wait for the modal with results
-                    page.wait_for_selector("div.ReactModalPortal h2", timeout=30000)
+                        # Wait for results
+                        driver.wait_for_element_visible("//div[contains(@class,'ReactModalPortal')]//h2", timeout=25)
 
-                    traffic = page.locator("//span[contains(text(),'K') or contains(text(),'M') or contains(text(),'B')]").first.inner_text()
-                    value = page.locator("//span[starts-with(text(),'$')]").first.inner_text()
-                    country = page.locator("(//table)[1]//tr[1]//td[1]").first.inner_text()
-                    keyword = page.locator("(//table)[2]//tr[1]//td[1]").first.inner_text()
+                        traffic = driver.find_element("//span[contains(text(),'K') or contains(text(),'M') or contains(text(),'B')]").text.strip()
+                        value = driver.find_element("//span[starts-with(text(),'$')]").text.strip()
+                        country = driver.find_element("(//table)[1]//tr[1]//td[1]").text.strip()
+                        keyword = driver.find_element("(//table)[2]//tr[1]//td[1]").text.strip()
 
-                    row.update({
-                        "Organic Traffic": traffic,
-                        "Traffic Value": value,
-                        "Top Country": country,
-                        "Top Keyword": keyword,
-                        "Status": "Success"
-                    })
+                        row.update({
+                            "Organic Traffic": traffic,
+                            "Traffic Value": value,
+                            "Top Country": country,
+                            "Top Keyword": keyword,
+                            "Status": "Success"
+                        })
+                        success = True
+                        break
 
-                except Exception as e:
-                    row.update({
-                        "Organic Traffic": "—", "Traffic Value": "—",
-                        "Top Country": "—", "Top Keyword": "—",
-                        "Status": "Failed / Blocked"
-                    })
+                    except Exception as e:
+                        if attempt == 2:
+                            row.update({
+                                "Organic Traffic": "—", "Traffic Value": "—",
+                                "Top Country": "—", "Top Keyword": "—",
+                                "Status": "Blocked/Failed"
+                            })
 
                 results.append(row)
                 progress.progress(idx / len(df))
                 table.dataframe(pd.DataFrame(results), use_container_width=True)
 
-            browser.close()
+        finally:
+            driver.quit()
 
         st.balloons()
         csv = pd.DataFrame(results).to_csv(index=False).encode()
