@@ -1,8 +1,21 @@
 import streamlit as st
 import pandas as pd
-from seleniumbase import Driver
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 import time
+import subprocess
+import os
+
+# Install Chromium on first run (works in Streamlit Cloud via apt)
+if not os.path.exists('/usr/bin/chromium-browser'):
+    subprocess.run(['apt-get', 'update'], check=True)
+    subprocess.run(['apt-get', 'install', '-y', 'chromium-browser'], check=True)
+
 st.markdown('''<style>
             @import url('https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap');
 
@@ -411,15 +424,13 @@ col1, col2 = st.columns(2)
 with col1:
     timeout = st.number_input("Safety timeout per domain (seconds)", 40, 180, 70, 10)
 with col2:
-    mode = st.selectbox("Mode", ["Headless (Fastest)", "Visible (debug)"], index=0)
-
-headless = (mode == "Headless (Fastest)")
+    headless = st.selectbox("Mode", ["Headless (Cloud Required)"], index=0) == "Headless (Cloud Required)"
 
 uploaded_file = st.file_uploader("Upload CSV/XLSX with domains", type=["csv", "xlsx"])
 
 if uploaded_file:
     df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
-    st.dataframe(df.head(10), use_container_width=True)
+    st.dataframe(df.head(10), width="stretch")
 
     domain_col = st.selectbox("Column with Websites URLs", df.columns)
 
@@ -430,82 +441,69 @@ if uploaded_file:
         status = st.empty()
         table = st.empty()
 
-        driver = Driver(
-            browser="chrome",
-            headless=headless,
-            uc=True,
-            incognito=True,
-            disable_gpu=True,
-            no_sandbox=True,
-            binary_location="cft",  # Forces auto-download of Chrome for Testing (works in containers)
-            chromium_arg="--disable-blink-features=AutomationControlled --no-sandbox --disable-dev-shm-usage"
-        )
+        # Chrome options for Cloud (Chromium binary)
+        chrome_options = Options()
+        if headless:
+            chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options.binary_location = "/usr/bin/chromium-browser"  # Use installed Chromium
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+        wait = WebDriverWait(driver, timeout)
 
         try:
-            for idx, domain in enumerate(df[domain_col].dropna(), 1):
+            for idx, raw_domain in enumerate(df[domain_col].dropna(), 1):
+                domain = str(raw_domain).strip().lower().replace("http://", "").replace("https://", "").split("/")[0]
                 row = {"Domain": domain}
-                status.markdown(f"<p class='p'>({idx} / {len(df)}): <strong>{domain}</strong></p>",unsafe_allow_html=True)
+                status.markdown(f"<p class='p'>({idx} / {len(df)}): <strong>{domain}</strong></p>", unsafe_allow_html=True)
 
                 success = False
-                for attempt in range(3):  # Retry up to 3 times per domain
+                for attempt in range(3):
                     try:
-                        # Open Ahrefs with reconnect
-                        driver.uc_open_with_reconnect(
-                            f"https://ahrefs.com/traffic-checker/?input={domain}&mode=domain",
-                            reconnect_time=5
-                        )
+                        driver.get(f"https://ahrefs.com/traffic-checker/?input={domain}&mode=domain")
+                        time.sleep(3)
 
                         # Click "Check traffic" if present
                         try:
-                            btn = driver.find_element(By.XPATH, "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'check traffic')]")
+                            btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'check traffic')]")))
                             driver.execute_script("arguments[0].click();", btn)
-                            time.sleep(1.5)
+                            time.sleep(2)
                         except:
                             pass
 
-                        # Enhanced Cloudflare handling
-                        if not any(c["name"] == "cf_clearance" for c in driver.get_cookies()):
-                            cf_start = time.time()
-                            while time.time() - cf_start < 40:  # Longer timeout
-                                try:
-                                    # Explicitly check for CAPTCHA iframe
-                                    captcha_iframe = driver.find_elements(By.CSS_SELECTOR, "iframe[src*='challenges.cloudflare.com']")
-                                    if captcha_iframe:
-                                        driver.switch_to.frame(captcha_iframe[0])
-                                        checkbox = driver.find_element(By.ID, "cf-chl-widget-0")  # Common CAPTCHA checkbox ID
-                                        driver.execute_script("arguments[0].click();", checkbox)
-                                        driver.switch_to.default_content()
-                                    else:
-                                        driver.uc_gui_click_captcha()  # Fallback to built-in
-                                except:
-                                    pass
-                                
-                                if any(c["name"] == "cf_clearance" for c in driver.get_cookies()):
+                        # Cloudflare/CAPTCHA handling (retry loop)
+                        cf_start = time.time()
+                        while time.time() - cf_start < 40:
+                            try:
+                                # Check for CAPTCHA and attempt checkbox
+                                iframes = driver.find_elements(By.CSS_SELECTOR, "iframe[src*='challenges.cloudflare.com']")
+                                if iframes:
+                                    driver.switch_to.frame(iframes[0])
+                                    checkbox = driver.find_element(By.ID, "cf-chl-widget-0")
+                                    driver.execute_script("arguments[0].click();", checkbox)
+                                    driver.switch_to.default_content()
+                                    time.sleep(2)
+                                # Check for clearance cookie
+                                cookies = driver.get_cookies()
+                                if any(c["name"] == "cf_clearance" for c in cookies):
                                     break
-                                time.sleep(0.8)  # Tighter loop for faster detection
+                            except:
+                                pass
+                            time.sleep(1)
 
-                            if not any(c["name"] == "cf_clearance" for c in driver.get_cookies()):
-                                if headless:
-                                    st.warning(f"CAPTCHA unsolved in headless mode for {domain}. Try visible mode.")
-                                    break
-                                else:
-                                    st.info(f"Manual CAPTCHA may be needed for {domain}. Solve it in the browser window.")
-                                    time.sleep(10)  # Give time for manual solve
-
-                        # Wait for modal title (data indicator)
-                        driver.wait_for_element_visible("//div[contains(@class,'ReactModalPortal')]//h2", timeout=20)
-
-                        # Extract data
-                        website = driver.find_element(By.XPATH, "//div[contains(@class,'ReactModalPortal')]//h2").text.strip()
-
-                        traffic = driver.find_element(By.XPATH, 
-                            "//div[contains(@class,'ReactModalPortal')]//span[contains(text(),'K') or contains(text(),'M') or contains(text(),'B')]"
-                        ).text.strip()
-
-                        value = driver.find_element(By.XPATH, 
-                            "//div[contains(@class,'ReactModalPortal')]//span[starts-with(text(),'$')]"
-                        ).text.strip()
-
+                        # Wait for modal and extract
+                        modal = wait.until(EC.presence_of_element_located((By.XPATH, "//div[contains(@class,'ReactModalPortal')]//h2")))
+                        traffic = driver.find_element(By.XPATH, "//div[contains(@class,'ReactModalPortal')]//span[contains(text(),'K') or contains(text(),'M') or contains(text(),'B')]").text.strip()
+                        value = driver.find_element(By.XPATH, "//div[contains(@class,'ReactModalPortal')]//span[starts-with(text(),'$')]").text.strip()
                         top_country = driver.find_element(By.XPATH, "(//div[contains(@class,'ReactModalPortal')]//table)[1]//tr[1]//td[1]").text.strip()
                         top_keyword = driver.find_element(By.XPATH, "(//div[contains(@class,'ReactModalPortal')]//table)[2]//tr[1]//td[1]").text.strip()
 
@@ -517,21 +515,21 @@ if uploaded_file:
                             "Status": "Success"
                         })
                         success = True
-                        break  # Exit retry loop on success
+                        break
 
                     except Exception as e:
-                        if attempt == 2:  # Final failure after retries
+                        if attempt == 2:
                             row.update({
                                 "Organic Traffic": "—",
                                 "Traffic Value": "—",
                                 "Top Country": "—",
                                 "Top Keyword": "—",
-                                "Status": f"Failed Due to CLoudFlare!"
+                                "Status": "Failed (Cloudflare/Timeout)"
                             })
 
                 results.append(row)
                 progress.progress(idx / len(df))
-                table.dataframe(pd.DataFrame(results), use_container_width=True)
+                table.dataframe(pd.DataFrame(results), width="stretch")
 
         finally:
             driver.quit()
