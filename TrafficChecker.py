@@ -356,10 +356,3 @@ if uploaded_file is not None:
         st.error(f"Error reading file: {str(e)}")
 
 st.markdown("---")
-st.caption("""
-**Important notes 2026:**
-• On Streamlit Cloud → headless mode only (visible mode works locally)
-• Cloudflare blocks many requests from cloud IPs → expect 50–80% failure rate
-• For serious work: use residential proxies or Ahrefs API
-
-**For Streamlit Cloud deployment, add to requirements.txt:**
