@@ -288,7 +288,6 @@ async def process_urls(urls, max_wait, headless, progress_callback=None):
 st.set_page_config(page_title="Ahrefs Traffic Bulk Checker", layout="centered")
 
 st.title("Ahrefs Traffic Checker – Bulk Extraction")
-st.caption("2026 Cloud Compatible Version • Cloudflare may block many requests")
 
 # Initialize Chrome on first load
 if 'chrome_initialized' not in st.session_state:
@@ -356,3 +355,4 @@ if uploaded_file is not None:
         st.error(f"Error reading file: {str(e)}")
 
 st.markdown("---")
+
