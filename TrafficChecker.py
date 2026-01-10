@@ -4,6 +4,7 @@ import pandas as pd
 import re
 import time
 import asyncio
+import os
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -23,6 +24,9 @@ def local_css(file_name):
 
 local_css("style.css")
 
+# ── Detect if on Streamlit Cloud ─────────────────────────────────────────────
+is_cloud = os.environ.get("STREAMLIT_SERVER_ENABLE_STATIC_SERVING", False)  # Rough detection
+
 # ── Driver Factory ───────────────────────────────────────────────────────────
 @st.cache_resource
 def init_driver(headless_mode=True):
@@ -34,16 +38,22 @@ def init_driver(headless_mode=True):
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1280,900")
     
-    # Headless or visible mode
+    # Force headless on cloud
+    if is_cloud:
+        headless_mode = True
+        st.warning("Visible mode disabled on Streamlit Cloud (no display server). Running headless.")
+
+    # Headless or visible
     if headless_mode:
         chrome_options.add_argument("--headless=new")
     else:
-        st.warning("Running in VISIBLE mode – browser window will appear (only useful locally)")
+        st.warning("Visible mode: Browser will appear (local only). Solve captchas manually if needed.")
 
-    # Important for Streamlit Cloud (Debian Bookworm)
+    # Binary path
     chrome_options.binary_location = "/usr/bin/chromium"
 
-    service = Service(executable_path="/usr/bin/chromedriver")
+    # Enable verbose logging for debug
+    service = Service(executable_path="/usr/bin/chromedriver", log_output="chromedriver.log")
 
     try:
         driver = webdriver.Chrome(service=service, options=chrome_options)
@@ -51,11 +61,12 @@ def init_driver(headless_mode=True):
             driver.maximize_window()
         return driver
     except Exception as e:
-        st.error("Chromium driver initialization failed")
+        st.error("Chromium driver failed to start")
         st.error(str(e))
+        st.error("Tip: Check chromedriver.log for details (download from app files). Common: no display in cloud.")
         st.stop()
 
-# ── Updated scraping function with better selectors ──────────────────────────
+# ── Scraping function (unchanged selectors) ──────────────────────────────────
 def scrape_ahrefs_traffic(driver, url, max_wait):
     result = {
         "URL": url,
@@ -174,16 +185,16 @@ with col1:
 with col2:
     max_wait = st.number_input("Max wait per URL (sec)", 30, 180, 70, 5)
 with col3:
-    headless = st.checkbox("Run in Headless mode", value=True,
-                          help="Uncheck to see browser actions (only useful when running locally)")
+    headless = st.checkbox("Run Headless", value=True,
+                          help="Uncheck for visible browser (local debugging only; won't work on cloud)")
 
 if uploaded_file is not None:
     try:
         df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
-        url_col = st.selectbox("Select URL/Domain column", df.columns)
+        url_col = st.selectbox("Select URL column", df.columns)
         urls = df[url_col].dropna().unique().tolist()
 
-        st.markdown(f"**{len(urls)} unique URLs/domains found**")
+        st.markdown(f"**{len(urls)} unique URLs found**")
 
         if st.button("Start Processing", type="primary"):
             spinner = st.empty()
@@ -227,7 +238,4 @@ if uploaded_file is not None:
         st.error(f"Error reading file: {str(e)}")
 
 st.markdown("---")
-st.caption("**Important notes 2026:**\n"
-           "• On Streamlit Cloud → headless mode only (visible mode works locally)\n"
-           "• Cloudflare blocks many requests from cloud IPs → expect 50–80% failure rate\n"
-           "• For serious work: use residential proxies or Ahrefs API")
+st.caption("**2026 Notes:** Visible mode for local debug only (e.g., manual captcha). On cloud: Always headless. High Cloudflare failure rate expected.")
