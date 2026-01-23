@@ -8,7 +8,7 @@ import os
 import traceback
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.service import Service  # Selenium Manager uses this
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -24,48 +24,52 @@ def local_css(file_name):
 
 local_css("style.css")
 
-# ── Detect if running on Streamlit Cloud ─────────────────────────────────────
+# ── Detect if on Streamlit Cloud ─────────────────────────────────────────────
 is_cloud = os.environ.get("STREAMLIT_SERVER_ENABLE_STATIC_SERVING", False)
 
 # ── Driver Factory ───────────────────────────────────────────────────────────
 @st.cache_resource
-def init_driver():
+def init_driver(headless_mode=True):
     chrome_options = Options()
-
-    # Must-have for Streamlit Cloud
+    
+    # Essential for cloud/headless
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1280,900")
-
-    # Anti-detection / stealth flags (helps vs Cloudflare)
+    
+    # Stealth / anti-bot (helps with Cloudflare)
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option("useAutomationExtension", False)
+    chrome_options.add_experimental_option('useAutomationExtension', False)
     chrome_options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     )
-
-    # Always force headless on cloud — visible mode impossible there
+    
     if is_cloud:
+        headless_mode = True
+        st.warning("Visible mode disabled on Streamlit Cloud (no display server). Running headless.")
+    
+    if headless_mode:
         chrome_options.add_argument("--headless=new")
-        st.info("Running in headless mode (required on Streamlit Cloud — no display server available)")
     else:
-        # Local run → allow user to choose visible/headless
-        if not st.session_state.get("headless", True):
-            st.info("Visible browser mode activated (local run only)")
-
+        st.warning("Visible mode: Browser will appear (local debugging only). Solve captchas manually if needed.")
+    
     try:
-        # Selenium Manager automatically downloads compatible chromedriver
-        service = Service()                     # ← this is the key line
+        # Selenium Manager auto-downloads compatible ChromeDriver for the installed Chromium
+        # No webdriver-manager, no version pins, no manual paths
+        service = Service()  # ← This triggers auto-download/management
         driver = webdriver.Chrome(service=service, options=chrome_options)
+        
+        if not headless_mode:
+            driver.maximize_window()
         return driver
-
+    
     except Exception as e:
-        st.error("Failed to initialize Chrome driver")
+        st.error("Chromium driver failed to start")
         st.error(str(e))
-        st.error("Common causes:\n• Missing 'chromium' in packages.txt\n• Selenium < 4.6\n• Container resource limits")
+        st.error("Tip: Ensure 'selenium' >=4.6 in requirements.txt. Check logs for download issues.")
         st.stop()
 
 # ── Scraping function ────────────────────────────────────────────────────────
@@ -85,157 +89,161 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
     }
 
     try:
-        target = f"https://ahrefs.com/traffic-checker/?input={url}&mode=subdomains"
-        driver.get(target)
-
-        time.sleep(3.5)  # short initial delay
-
-        # Wait for Cloudflare clearance cookie
+        full_url = f"https://ahrefs.com/traffic-checker/?input={url}&mode=subdomains"
+        driver.get(full_url)
+        
+        time.sleep(4)  # breathing room
+        
+        # Cloudflare clearance wait
+        start_cf = time.time()
         cleared = False
-        start = time.time()
-        while time.time() - start < max_wait:
+        while time.time() - start_cf < max_wait:
             if any(c.get('name') == 'cf_clearance' for c in driver.get_cookies()):
                 cleared = True
                 break
-            time.sleep(1.2)
-
+            time.sleep(1.5)
+        
         if not cleared:
-            result["Debug"] = "Cloudflare clearance cookie not found → likely blocked"
-
-        # Wait for the result modal
-        WebDriverWait(driver, max_wait - 4).until(
+            result["Debug"] = "Cloudflare clearance not obtained → likely blocked"
+        
+        # Wait for results modal
+        WebDriverWait(driver, max_wait - 5).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, ".ReactModalPortal"))
         )
-
+        
         modal = driver.find_element(By.CSS_SELECTOR, ".ReactModalPortal")
-
-        def safe_text(locator_type, value):
+        
+        def safe_text(by, value):
             try:
-                return modal.find_element(locator_type, value).text.strip()
+                return modal.find_element(by, value).text.strip()
             except:
                 return "N/A"
-
-        result["Website"]       = safe_text(By.CSS_SELECTOR, "h2") or "N/A"
-
+        
+        result["Website"] = safe_text(By.CSS_SELECTOR, "h2") or "N/A"
+        
         result["Organic Traffic"] = safe_text(
             By.XPATH,
             "//div[contains(@class,'ReactModalPortal')]//span[contains(@class,'css-vemh4e') or contains(text(),'K') or contains(text(),'M') or contains(text(),'B')]"
         ) or safe_text(By.XPATH, "//div[1]/div[1]/div[2]/div[1]/div[1]/div[1]/div[2]/div/div/div/span")
-
+        
         result["Traffic Value"] = safe_text(
             By.XPATH,
             "//div[contains(@class,'ReactModalPortal')]//span[starts-with(text(),'$') or contains(@class,'css-6s0ffe')]"
         ) or safe_text(By.XPATH, "//div[1]/div[1]/div[2]/div[1]/div[1]/div[2]/div[2]/div/div/div/span")
-
-        # Top country row
+        
         country_row = safe_text(By.CSS_SELECTOR, "table:nth-of-type(1) tr:first-child")
         if country_row != "N/A":
-            m = re.match(r"(.+?)\s+([\d\.]+%)", country_row.strip())
-            if m:
-                result["Top Country"] = m.group(1).strip()
-                result["Top Country Share"] = m.group(2)
-
-        # Top keyword row
+            match = re.match(r"(.+?)\s+([\d.%]+)", country_row.strip())
+            if match:
+                result["Top Country"] = match.group(1).strip()
+                result["Top Country Share"] = match.group(2)
+        
         kw_row = safe_text(By.CSS_SELECTOR, "table:nth-of-type(2) tr:first-child")
         if kw_row != "N/A":
-            m = re.match(r"(.+?)\s+(\d+)\s+([\d,K,M\.]+)", kw_row.strip())
-            if m:
-                result["Top Keyword"] = m.group(1)
-                result["Keyword Position"] = m.group(2)
-                result["Top Keyword Traffic"] = m.group(3)
-
+            match = re.match(r"(.+?)\s+(\d+)\s+([\d,K,M\.]+)", kw_row.strip())
+            if match:
+                result["Top Keyword"] = match.group(1)
+                result["Keyword Position"] = match.group(2)
+                result["Top Keyword Traffic"] = match.group(3)
+        
         result["Status"] = "Success"
         result["Debug"] = "OK"
-
+    
     except Exception as e:
-        result["Organic Traffic"] = f"Error: {str(e)[:90]}…"
+        result["Organic Traffic"] = f"Error: {str(e)[:80]}..."
         result["Status"] = "Failed"
-        result["Debug"] = traceback.format_exc()[:450].replace("\n", "  ")
-
+        result["Debug"] = traceback.format_exc()[:400]
+    
     return result
 
 # ── Batch processing ─────────────────────────────────────────────────────────
-async def process_urls(urls, max_wait_sec):
-    driver = init_driver()
-    executor = ThreadPoolExecutor(max_workers=1)  # conservative on cloud
+async def process_urls(urls, max_wait, headless, progress_callback=None):
+    driver = init_driver(headless_mode=headless)
     loop = asyncio.get_event_loop()
-
+    executor = ThreadPoolExecutor(max_workers=1)  # conservative for cloud resources
+    
     results = []
     total = len(urls)
-    start_time = time.time()
-
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    result_table = st.empty()
+    start = time.time()
 
     for i, url in enumerate(urls):
-        row = await loop.run_in_executor(executor, scrape_ahrefs_traffic, driver, url, max_wait_sec)
+        row = await loop.run_in_executor(executor, scrape_ahrefs_traffic, driver, url, max_wait)
         results.append(row)
 
-        progress = (i + 1) / total
-        elapsed = time.time() - start_time
-        eta_min = round(((elapsed / (i + 1)) * (total - i - 1)) / 60, 1) if i < total - 1 else 0
-        successes = sum(1 for r in results if r["Status"] == "Success")
+        elapsed = time.time() - start
+        eta = (elapsed / (i+1)) * (total - i - 1) if i < total-1 else 0
+        success = sum(1 for r in results if r["Status"] == "Success")
 
-        status_text.markdown(
-            f"**Progress:** {i+1}/{total} • **Success:** {successes} • **ETA:** ~{eta_min} min"
-        )
-        progress_bar.progress(progress)
-        result_table.dataframe(pd.DataFrame(results))
+        if progress_callback:
+            progress_callback(i+1, total, success, round(eta/60, 1), results)
 
     driver.quit()
     return results
 
 # ── Streamlit UI ─────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Ahrefs Traffic Bulk Checker", layout="wide")
+st.set_page_config(page_title="Ahrefs Traffic Bulk Checker", layout="centered")
 
 st.title("Ahrefs Traffic Checker – Bulk Extraction")
-st.caption("2026 edition • Cloudflare protection is very aggressive → expect partial success")
+st.caption("2026 Cloud Compatible Version • Cloudflare may block many requests")
 
-col1, col2 = st.columns([3, 1])
-
+# Controls
+col1, col2, col3 = st.columns([3, 2, 2])
 with col1:
-    uploaded_file = st.file_uploader("Upload CSV or XLSX with URLs", type=["csv", "xlsx"])
-
+    uploaded_file = st.file_uploader("Upload CSV/XLSX", type=["csv", "xlsx"])
 with col2:
-    max_wait = st.number_input("Max wait per site (seconds)", 20, 240, 75, step=5)
+    max_wait = st.number_input("Max wait per URL (sec)", 30, 180, 70, 5)
+with col3:
+    headless = st.checkbox("Run Headless", value=True,
+                          help="Uncheck for visible browser (local debugging only; won't work on cloud)")
 
 if uploaded_file is not None:
     try:
-        if uploaded_file.name.endswith(".csv"):
-            df = pd.read_csv(uploaded_file)
-        else:
-            df = pd.read_excel(uploaded_file)
+        df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
+        url_col = st.selectbox("Select URL column", df.columns)
+        urls = df[url_col].dropna().unique().tolist()
 
-        url_column = st.selectbox("Select column containing URLs", options=df.columns)
-        urls = df[url_column].dropna().astype(str).unique().tolist()
+        st.markdown(f"**{len(urls)} unique URLs found**")
 
-        st.markdown(f"**Found {len(urls)} unique URLs**")
+        if st.button("Start Processing", type="primary"):
+            spinner = st.empty()
+            spinner.markdown(
+                """
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <div class="loader"></div>
+                    <span>Starting process...</span>
+                </div>
+                <style>.loader {border:5px solid #f3f3f3;border-top:5px solid #3498db;border-radius:50%;width:28px;height:28px;animation:spin 1s linear infinite;} @keyframes spin {0% {transform:rotate(0deg);} 100% {transform:rotate(360deg);}}</style>
+                """, unsafe_allow_html=True
+            )
 
-        if st.button("▶️  Start Processing", type="primary", use_container_width=True):
-            with st.spinner("Initializing browser..."):
-                results = asyncio.run(process_urls(urls, max_wait))
+            progress = st.progress(0)
+            status = st.empty()
+            table = st.empty()
 
+            def update_ui(current, total, success_count, eta_min, current_results):
+                progress.progress(current / total)
+                status.markdown(f"**Progress:** {current}/{total} • **Success:** {success_count} • **ETA:** ~{eta_min} min")
+                table.dataframe(pd.DataFrame(current_results))
+
+            results = asyncio.run(
+                process_urls(urls, max_wait, headless=headless, progress_callback=update_ui)
+            )
+
+            spinner.empty()
             st.success("Processing finished!")
+
             if results:
                 final_df = pd.DataFrame(results)
-                csv_bytes = final_df.to_csv(index=False).encode('utf-8')
+                csv = final_df.to_csv(index=False).encode('utf-8')
                 st.download_button(
-                    label="📥 Download Results as CSV",
-                    data=csv_bytes,
-                    file_name=f"ahrefs_traffic_{time.strftime('%Y-%m-%d_%H%M')}.csv",
-                    mime="text/csv",
-                    use_container_width=True
+                    "Download Results CSV",
+                    data=csv,
+                    file_name=f"ahrefs_traffic_{time.strftime('%Y%m%d_%H%M')}.csv",
+                    mime="text/csv"
                 )
 
     except Exception as e:
         st.error(f"Error reading file: {str(e)}")
 
 st.markdown("---")
-st.caption(
-    "**Important 2026 notes**\n"
-    "• Always headless on Streamlit Cloud (no graphical display)\n"
-    "• Cloudflare detects & blocks headless Chrome aggressively\n"
-    "• Use the **Debug** column to understand failures\n"
-    "• For manual captcha solving → run locally and disable headless"
-)
+st.caption("**2026 Notes:** Using Selenium Manager for auto driver matching. Headless only on cloud. Check 'Debug' column for Cloudflare blocks or other issues. Expect partial success due to aggressive bot protection.")
