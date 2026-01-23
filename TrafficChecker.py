@@ -6,14 +6,12 @@ import time
 import asyncio
 import os
 import traceback
-import shutil
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.service import Service  # Selenium Manager uses this
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
 from concurrent.futures import ThreadPoolExecutor
 
 # ── Custom CSS Loader ────────────────────────────────────────────────────────
@@ -34,11 +32,13 @@ is_cloud = os.environ.get("STREAMLIT_SERVER_ENABLE_STATIC_SERVING", False)
 def init_driver(headless_mode=True):
     chrome_options = Options()
     
+    # Essential for cloud/headless
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1280,900")
     
+    # Stealth / anti-bot (helps with Cloudflare)
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
@@ -49,27 +49,17 @@ def init_driver(headless_mode=True):
     
     if is_cloud:
         headless_mode = True
-        st.warning("Visible mode disabled on Streamlit Cloud. Running headless.")
+        st.warning("Visible mode disabled on Streamlit Cloud (no display server). Running headless.")
     
     if headless_mode:
         chrome_options.add_argument("--headless=new")
     else:
-        st.warning("Visible mode: local debugging only. Solve captchas manually if needed.")
+        st.warning("Visible mode: Browser will appear (local debugging only). Solve captchas manually if needed.")
     
     try:
-        # Clear old cache to prevent version conflicts
-        cache_dir = os.path.expanduser("~/.cache/selenium")
-        if os.path.exists(cache_dir):
-            try:
-                shutil.rmtree(cache_dir)
-                st.info("Cleared old Selenium cache for fresh driver download.")
-            except Exception as e:
-                st.warning(f"Cache clear failed (non-fatal): {e}")
-        
-        # Auto-detect & download matching driver for installed Chromium (~144.x)
-        driver_path = ChromeDriverManager().install()  # ← This should work now
-        
-        service = Service(driver_path)
+        # Selenium Manager auto-downloads compatible ChromeDriver for the installed Chromium
+        # No webdriver-manager, no version pins, no manual paths
+        service = Service()  # ← This triggers auto-download/management
         driver = webdriver.Chrome(service=service, options=chrome_options)
         
         if not headless_mode:
@@ -79,10 +69,10 @@ def init_driver(headless_mode=True):
     except Exception as e:
         st.error("Chromium driver failed to start")
         st.error(str(e))
-        st.error("Tip: If version error persists, try Selenium Manager (built-in auto-download).")
+        st.error("Tip: Ensure 'selenium' >=4.6 in requirements.txt. Check logs for download issues.")
         st.stop()
 
-# ── Scraping function (unchanged from your last version) ──────────────────────
+# ── Scraping function ────────────────────────────────────────────────────────
 def scrape_ahrefs_traffic(driver, url, max_wait):
     result = {
         "URL": url,
@@ -102,8 +92,9 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
         full_url = f"https://ahrefs.com/traffic-checker/?input={url}&mode=subdomains"
         driver.get(full_url)
         
-        time.sleep(4)
+        time.sleep(4)  # breathing room
         
+        # Cloudflare clearance wait
         start_cf = time.time()
         cleared = False
         while time.time() - start_cf < max_wait:
@@ -113,8 +104,9 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
             time.sleep(1.5)
         
         if not cleared:
-            result["Debug"] = "No cf_clearance cookie after wait → likely blocked by Cloudflare"
+            result["Debug"] = "Cloudflare clearance not obtained → likely blocked"
         
+        # Wait for results modal
         WebDriverWait(driver, max_wait - 5).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, ".ReactModalPortal"))
         )
@@ -168,7 +160,7 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
 async def process_urls(urls, max_wait, headless, progress_callback=None):
     driver = init_driver(headless_mode=headless)
     loop = asyncio.get_event_loop()
-    executor = ThreadPoolExecutor(max_workers=1)
+    executor = ThreadPoolExecutor(max_workers=1)  # conservative for cloud resources
     
     results = []
     total = len(urls)
@@ -194,6 +186,7 @@ st.set_page_config(page_title="Ahrefs Traffic Bulk Checker", layout="centered")
 st.title("Ahrefs Traffic Checker – Bulk Extraction")
 st.caption("2026 Cloud Compatible Version • Cloudflare may block many requests")
 
+# Controls
 col1, col2, col3 = st.columns([3, 2, 2])
 with col1:
     uploaded_file = st.file_uploader("Upload CSV/XLSX", type=["csv", "xlsx"])
@@ -253,4 +246,4 @@ if uploaded_file is not None:
         st.error(f"Error reading file: {str(e)}")
 
 st.markdown("---")
-st.caption("**2026 Notes:** Headless only on cloud. Check 'Debug' column for issues. Cloudflare blocks are common. Driver now auto-detected for Chromium ~144.x.")
+st.caption("**2026 Notes:** Using Selenium Manager for auto driver matching. Headless only on cloud. Check 'Debug' column for Cloudflare blocks or other issues. Expect partial success due to aggressive bot protection.")
