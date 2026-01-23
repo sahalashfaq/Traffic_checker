@@ -1,5 +1,2 @@
-streamlit
-pandas
-openpyxl
-selenium
-webdriver-manager
+chromium
+chromium-driver
