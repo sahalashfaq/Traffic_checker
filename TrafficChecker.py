@@ -34,13 +34,11 @@ is_cloud = os.environ.get("STREAMLIT_SERVER_ENABLE_STATIC_SERVING", False)
 def init_driver(headless_mode=True):
     chrome_options = Options()
     
-    # Essential cloud flags
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1280,900")
     
-    # Anti-detection / stealth (helps vs Cloudflare)
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
@@ -59,24 +57,21 @@ def init_driver(headless_mode=True):
         st.warning("Visible mode: local debugging only. Solve captchas manually if needed.")
     
     try:
-        # Clear old cached drivers (prevents stuck old versions like 114)
+        # Clear old cache to prevent version conflicts
         cache_dir = os.path.expanduser("~/.cache/selenium")
         if os.path.exists(cache_dir):
             try:
                 shutil.rmtree(cache_dir)
-                st.info("Cleared old Selenium/WebDriver cache to force fresh download.")
-            except Exception as clear_err:
-                st.warning(f"Cache clear failed: {clear_err}")
+                st.info("Cleared old Selenium cache for fresh driver download.")
+            except Exception as e:
+                st.warning(f"Cache clear failed (non-fatal): {e}")
         
-        # Force driver version matching Chromium ~144 on Streamlit Cloud (2026)
-        # Use driver_version= (not version=) → this is the fix for your error
-        driver_path = ChromeDriverManager(
-            driver_version="144.0.5733.199"   # or try "144" / "latest" if this patch fails
-        ).install()
+        # Auto-detect & download matching driver for installed Chromium (~144.x)
+        driver_path = ChromeDriverManager().install()  # ← This should work now
         
         service = Service(driver_path)
-        
         driver = webdriver.Chrome(service=service, options=chrome_options)
+        
         if not headless_mode:
             driver.maximize_window()
         return driver
@@ -84,10 +79,10 @@ def init_driver(headless_mode=True):
     except Exception as e:
         st.error("Chromium driver failed to start")
         st.error(str(e))
-        st.error("Tip: Check backend logs. Common fixes: version mismatch, cache issues, or missing chromium package.")
+        st.error("Tip: If version error persists, try Selenium Manager (built-in auto-download).")
         st.stop()
 
-# ── Scraping function ────────────────────────────────────────────────────────
+# ── Scraping function (unchanged from your last version) ──────────────────────
 def scrape_ahrefs_traffic(driver, url, max_wait):
     result = {
         "URL": url,
@@ -109,7 +104,6 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
         
         time.sleep(4)
         
-        # Cloudflare wait
         start_cf = time.time()
         cleared = False
         while time.time() - start_cf < max_wait:
@@ -259,4 +253,4 @@ if uploaded_file is not None:
         st.error(f"Error reading file: {str(e)}")
 
 st.markdown("---")
-st.caption("**2026 Notes:** Headless only on cloud. Check 'Debug' column. Cloudflare blocks → partial success expected. If driver still fails, try driver_version='144' or 'latest'.")
+st.caption("**2026 Notes:** Headless only on cloud. Check 'Debug' column for issues. Cloudflare blocks are common. Driver now auto-detected for Chromium ~144.x.")
