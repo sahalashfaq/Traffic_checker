@@ -6,6 +6,7 @@ import time
 import asyncio
 import os
 import traceback
+import shutil
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -42,7 +43,7 @@ def init_driver(headless_mode=True):
     # Stealth options to reduce Cloudflare detection
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option("useAutomationExtension", False)
+    chrome_options.add_experimental_option('useAutomationExtension', False)
     chrome_options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -59,7 +60,21 @@ def init_driver(headless_mode=True):
         st.warning("Visible mode: Browser will appear (local debugging only). Solve captchas manually if needed.")
     
     try:
-        service = Service(ChromeDriverManager().install())
+        # Clear old cached drivers to avoid version mismatch
+        cache_dir = os.path.expanduser("~/.cache/selenium")
+        if os.path.exists(cache_dir):
+            try:
+                shutil.rmtree(cache_dir)
+                st.info("Cleared old Selenium driver cache.")
+            except:
+                pass
+        
+        # Force ChromeDriver version to match Chromium ~144.x (Streamlit Cloud 2026)
+        # Latest known compatible patch for 144 series
+        driver_path = ChromeDriverManager(version="144.0.5733.199").install()
+        
+        service = Service(driver_path)
+        
         driver = webdriver.Chrome(service=service, options=chrome_options)
         if not headless_mode:
             driver.maximize_window()
@@ -67,7 +82,7 @@ def init_driver(headless_mode=True):
     except Exception as e:
         st.error("Chromium driver failed to start")
         st.error(str(e))
-        st.error("Tip: Check the backend logs for more details.")
+        st.error("Tip: Check backend logs. Common: version mismatch or Cloudflare.")
         st.stop()
 
 # ── Scraping function ────────────────────────────────────────────────────────
@@ -83,16 +98,16 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
         "Keyword Position": "N/A",
         "Top Keyword Traffic": "N/A",
         "Status": "Failed",
-        "Debug": ""  # ← added for better error visibility
+        "Debug": ""
     }
 
     try:
         full_url = f"https://ahrefs.com/traffic-checker/?input={url}&mode=subdomains"
         driver.get(full_url)
         
-        time.sleep(4)  # shorter initial wait
+        time.sleep(4)  # initial wait
         
-        # Wait for Cloudflare clearance cookie
+        # Wait for Cloudflare clearance
         start_cf = time.time()
         cleared = False
         while time.time() - start_cf < max_wait:
@@ -103,9 +118,9 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
             time.sleep(1.5)
         
         if not cleared:
-            result["Debug"] = "Cloudflare clearance not obtained after wait"
+            result["Debug"] = "Cloudflare clearance not obtained"
         
-        # Wait for the modal to appear
+        # Wait for modal
         WebDriverWait(driver, max_wait - 5).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, ".ReactModalPortal"))
         )
@@ -120,13 +135,11 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
         
         result["Website"] = safe_text(By.CSS_SELECTOR, "h2") or "N/A"
         
-        # Organic Traffic
         result["Organic Traffic"] = safe_text(
             By.XPATH,
             "//div[contains(@class,'ReactModalPortal')]//span[contains(@class,'css-vemh4e') or contains(text(),'K') or contains(text(),'M') or contains(text(),'B')]"
         ) or safe_text(By.XPATH, "//div[1]/div[1]/div[2]/div[1]/div[1]/div[1]/div[2]/div/div/div/span")
         
-        # Traffic Value
         result["Traffic Value"] = safe_text(
             By.XPATH,
             "//div[contains(@class,'ReactModalPortal')]//span[starts-with(text(),'$') or contains(@class,'css-6s0ffe')]"
@@ -151,11 +164,11 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
         
         result["Status"] = "Success"
         result["Debug"] = "OK"
-        
+    
     except Exception as e:
         result["Organic Traffic"] = f"Error: {str(e)[:80]}..."
         result["Status"] = "Failed"
-        result["Debug"] = traceback.format_exc()[:400]  # truncated stack trace
+        result["Debug"] = traceback.format_exc()[:400]
     
     return result
 
@@ -163,7 +176,7 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
 async def process_urls(urls, max_wait, headless, progress_callback=None):
     driver = init_driver(headless_mode=headless)
     loop = asyncio.get_event_loop()
-    executor = ThreadPoolExecutor(max_workers=1)  # 1 is safer on cloud to avoid resource limits
+    executor = ThreadPoolExecutor(max_workers=1)  # Safer on cloud
     
     results = []
     total = len(urls)
@@ -249,4 +262,4 @@ if uploaded_file is not None:
         st.error(f"Error reading file: {str(e)}")
 
 st.markdown("---")
-st.caption("**2026 Notes:** Visible mode for local debug only. On cloud: Always headless. Cloudflare blocks many requests → expect partial success. Check the 'Debug' column for clues.")
+st.caption("**2026 Notes:** Headless only on cloud. Use 'Debug' column to diagnose failures. Cloudflare blocks are common → expect partial success.")
