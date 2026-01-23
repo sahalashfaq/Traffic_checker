@@ -34,13 +34,13 @@ is_cloud = os.environ.get("STREAMLIT_SERVER_ENABLE_STATIC_SERVING", False)
 def init_driver(headless_mode=True):
     chrome_options = Options()
     
-    # Essential for cloud
+    # Essential cloud flags
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1280,900")
     
-    # Stealth options to reduce Cloudflare detection
+    # Anti-detection / stealth (helps vs Cloudflare)
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
@@ -49,29 +49,30 @@ def init_driver(headless_mode=True):
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     )
     
-    # Force headless on cloud
     if is_cloud:
         headless_mode = True
-        st.warning("Visible mode disabled on Streamlit Cloud (no display server). Running headless.")
+        st.warning("Visible mode disabled on Streamlit Cloud. Running headless.")
     
     if headless_mode:
         chrome_options.add_argument("--headless=new")
     else:
-        st.warning("Visible mode: Browser will appear (local debugging only). Solve captchas manually if needed.")
+        st.warning("Visible mode: local debugging only. Solve captchas manually if needed.")
     
     try:
-        # Clear old cached drivers to avoid version mismatch
+        # Clear old cached drivers (prevents stuck old versions like 114)
         cache_dir = os.path.expanduser("~/.cache/selenium")
         if os.path.exists(cache_dir):
             try:
                 shutil.rmtree(cache_dir)
-                st.info("Cleared old Selenium driver cache.")
-            except:
-                pass
+                st.info("Cleared old Selenium/WebDriver cache to force fresh download.")
+            except Exception as clear_err:
+                st.warning(f"Cache clear failed: {clear_err}")
         
-        # Force ChromeDriver version to match Chromium ~144.x (Streamlit Cloud 2026)
-        # Latest known compatible patch for 144 series
-        driver_path = ChromeDriverManager(version="144.0.5733.199").install()
+        # Force driver version matching Chromium ~144 on Streamlit Cloud (2026)
+        # Use driver_version= (not version=) → this is the fix for your error
+        driver_path = ChromeDriverManager(
+            driver_version="144.0.5733.199"   # or try "144" / "latest" if this patch fails
+        ).install()
         
         service = Service(driver_path)
         
@@ -79,10 +80,11 @@ def init_driver(headless_mode=True):
         if not headless_mode:
             driver.maximize_window()
         return driver
+    
     except Exception as e:
         st.error("Chromium driver failed to start")
         st.error(str(e))
-        st.error("Tip: Check backend logs. Common: version mismatch or Cloudflare.")
+        st.error("Tip: Check backend logs. Common fixes: version mismatch, cache issues, or missing chromium package.")
         st.stop()
 
 # ── Scraping function ────────────────────────────────────────────────────────
@@ -105,22 +107,20 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
         full_url = f"https://ahrefs.com/traffic-checker/?input={url}&mode=subdomains"
         driver.get(full_url)
         
-        time.sleep(4)  # initial wait
+        time.sleep(4)
         
-        # Wait for Cloudflare clearance
+        # Cloudflare wait
         start_cf = time.time()
         cleared = False
         while time.time() - start_cf < max_wait:
-            cookies = driver.get_cookies()
-            if any(c.get('name') == 'cf_clearance' for c in cookies):
+            if any(c.get('name') == 'cf_clearance' for c in driver.get_cookies()):
                 cleared = True
                 break
             time.sleep(1.5)
         
         if not cleared:
-            result["Debug"] = "Cloudflare clearance not obtained"
+            result["Debug"] = "No cf_clearance cookie after wait → likely blocked by Cloudflare"
         
-        # Wait for modal
         WebDriverWait(driver, max_wait - 5).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, ".ReactModalPortal"))
         )
@@ -145,7 +145,6 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
             "//div[contains(@class,'ReactModalPortal')]//span[starts-with(text(),'$') or contains(@class,'css-6s0ffe')]"
         ) or safe_text(By.XPATH, "//div[1]/div[1]/div[2]/div[1]/div[1]/div[2]/div[2]/div/div/div/span")
         
-        # Top country
         country_row = safe_text(By.CSS_SELECTOR, "table:nth-of-type(1) tr:first-child")
         if country_row != "N/A":
             match = re.match(r"(.+?)\s+([\d.%]+)", country_row.strip())
@@ -153,7 +152,6 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
                 result["Top Country"] = match.group(1).strip()
                 result["Top Country Share"] = match.group(2)
         
-        # Top keyword
         kw_row = safe_text(By.CSS_SELECTOR, "table:nth-of-type(2) tr:first-child")
         if kw_row != "N/A":
             match = re.match(r"(.+?)\s+(\d+)\s+([\d,K,M\.]+)", kw_row.strip())
@@ -176,7 +174,7 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
 async def process_urls(urls, max_wait, headless, progress_callback=None):
     driver = init_driver(headless_mode=headless)
     loop = asyncio.get_event_loop()
-    executor = ThreadPoolExecutor(max_workers=1)  # Safer on cloud
+    executor = ThreadPoolExecutor(max_workers=1)
     
     results = []
     total = len(urls)
@@ -202,7 +200,6 @@ st.set_page_config(page_title="Ahrefs Traffic Bulk Checker", layout="centered")
 st.title("Ahrefs Traffic Checker – Bulk Extraction")
 st.caption("2026 Cloud Compatible Version • Cloudflare may block many requests")
 
-# Controls
 col1, col2, col3 = st.columns([3, 2, 2])
 with col1:
     uploaded_file = st.file_uploader("Upload CSV/XLSX", type=["csv", "xlsx"])
@@ -262,4 +259,4 @@ if uploaded_file is not None:
         st.error(f"Error reading file: {str(e)}")
 
 st.markdown("---")
-st.caption("**2026 Notes:** Headless only on cloud. Use 'Debug' column to diagnose failures. Cloudflare blocks are common → expect partial success.")
+st.caption("**2026 Notes:** Headless only on cloud. Check 'Debug' column. Cloudflare blocks → partial success expected. If driver still fails, try driver_version='144' or 'latest'.")
