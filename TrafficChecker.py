@@ -5,14 +5,15 @@ import re
 import time
 import asyncio
 import os
+import traceback
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 from concurrent.futures import ThreadPoolExecutor
-from io import BytesIO
 
 # ── Custom CSS Loader ────────────────────────────────────────────────────────
 def local_css(file_name):
@@ -25,37 +26,40 @@ def local_css(file_name):
 local_css("style.css")
 
 # ── Detect if on Streamlit Cloud ─────────────────────────────────────────────
-is_cloud = os.environ.get("STREAMLIT_SERVER_ENABLE_STATIC_SERVING", False)  # Rough detection
+is_cloud = os.environ.get("STREAMLIT_SERVER_ENABLE_STATIC_SERVING", False)
 
 # ── Driver Factory ───────────────────────────────────────────────────────────
 @st.cache_resource
 def init_driver(headless_mode=True):
     chrome_options = Options()
     
-    # Common options
+    # Essential for cloud
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1280,900")
     
+    # Stealth options to reduce Cloudflare detection
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+    chrome_options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    )
+    
     # Force headless on cloud
     if is_cloud:
         headless_mode = True
         st.warning("Visible mode disabled on Streamlit Cloud (no display server). Running headless.")
-
-    # Headless or visible
+    
     if headless_mode:
         chrome_options.add_argument("--headless=new")
     else:
-        st.warning("Visible mode: Browser will appear (local only). Solve captchas manually if needed.")
-
-    # Binary path
-    chrome_options.binary_location = "/usr/bin/chromium"
-
-    # Enable verbose logging for debug
-    service = Service(executable_path="/usr/bin/chromedriver", log_output="chromedriver.log")
-
+        st.warning("Visible mode: Browser will appear (local debugging only). Solve captchas manually if needed.")
+    
     try:
+        service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
         if not headless_mode:
             driver.maximize_window()
@@ -63,10 +67,10 @@ def init_driver(headless_mode=True):
     except Exception as e:
         st.error("Chromium driver failed to start")
         st.error(str(e))
-        st.error("Tip: Check chromedriver.log for details (download from app files). Common: no display in cloud.")
+        st.error("Tip: Check the backend logs for more details.")
         st.stop()
 
-# ── Scraping function (unchanged selectors) ──────────────────────────────────
+# ── Scraping function ────────────────────────────────────────────────────────
 def scrape_ahrefs_traffic(driver, url, max_wait):
     result = {
         "URL": url,
@@ -78,50 +82,56 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
         "Top Keyword": "N/A",
         "Keyword Position": "N/A",
         "Top Keyword Traffic": "N/A",
-        "Status": "Failed"
+        "Status": "Failed",
+        "Debug": ""  # ← added for better error visibility
     }
 
     try:
         full_url = f"https://ahrefs.com/traffic-checker/?input={url}&mode=subdomains"
         driver.get(full_url)
-
-        time.sleep(5)  # initial Cloudflare breathing room
-
-        # Try to wait for clearance (best effort)
+        
+        time.sleep(4)  # shorter initial wait
+        
+        # Wait for Cloudflare clearance cookie
         start_cf = time.time()
+        cleared = False
         while time.time() - start_cf < max_wait:
-            if any(c.get('name') == 'cf_clearance' for c in driver.get_cookies()):
+            cookies = driver.get_cookies()
+            if any(c.get('name') == 'cf_clearance' for c in cookies):
+                cleared = True
                 break
             time.sleep(1.5)
-
-        # Wait for modal to appear
+        
+        if not cleared:
+            result["Debug"] = "Cloudflare clearance not obtained after wait"
+        
+        # Wait for the modal to appear
         WebDriverWait(driver, max_wait - 5).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, ".ReactModalPortal"))
         )
-
+        
         modal = driver.find_element(By.CSS_SELECTOR, ".ReactModalPortal")
-
+        
         def safe_text(by, value):
             try:
                 return modal.find_element(by, value).text.strip()
             except:
                 return "N/A"
-
-        # Updated selectors based on your provided XPath structure
+        
         result["Website"] = safe_text(By.CSS_SELECTOR, "h2") or "N/A"
-
-        # Traffic amount - main big number
+        
+        # Organic Traffic
         result["Organic Traffic"] = safe_text(
             By.XPATH,
             "//div[contains(@class,'ReactModalPortal')]//span[contains(@class,'css-vemh4e') or contains(text(),'K') or contains(text(),'M') or contains(text(),'B')]"
         ) or safe_text(By.XPATH, "//div[1]/div[1]/div[2]/div[1]/div[1]/div[1]/div[2]/div/div/div/span")
-
-        # Traffic value (usually $X.XX)
+        
+        # Traffic Value
         result["Traffic Value"] = safe_text(
             By.XPATH,
             "//div[contains(@class,'ReactModalPortal')]//span[starts-with(text(),'$') or contains(@class,'css-6s0ffe')]"
         ) or safe_text(By.XPATH, "//div[1]/div[1]/div[2]/div[1]/div[1]/div[2]/div[2]/div/div/div/span")
-
+        
         # Top country
         country_row = safe_text(By.CSS_SELECTOR, "table:nth-of-type(1) tr:first-child")
         if country_row != "N/A":
@@ -129,7 +139,7 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
             if match:
                 result["Top Country"] = match.group(1).strip()
                 result["Top Country Share"] = match.group(2)
-
+        
         # Top keyword
         kw_row = safe_text(By.CSS_SELECTOR, "table:nth-of-type(2) tr:first-child")
         if kw_row != "N/A":
@@ -138,21 +148,23 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
                 result["Top Keyword"] = match.group(1)
                 result["Keyword Position"] = match.group(2)
                 result["Top Keyword Traffic"] = match.group(3)
-
+        
         result["Status"] = "Success"
-
+        result["Debug"] = "OK"
+        
     except Exception as e:
-        result["Organic Traffic"] = f"Error: {str(e)[:70]}..."
+        result["Organic Traffic"] = f"Error: {str(e)[:80]}..."
         result["Status"] = "Failed"
-
+        result["Debug"] = traceback.format_exc()[:400]  # truncated stack trace
+    
     return result
 
 # ── Batch processing ─────────────────────────────────────────────────────────
 async def process_urls(urls, max_wait, headless, progress_callback=None):
     driver = init_driver(headless_mode=headless)
     loop = asyncio.get_event_loop()
-    executor = ThreadPoolExecutor(max_workers=2)  # 2 is safer in visible mode
-
+    executor = ThreadPoolExecutor(max_workers=1)  # 1 is safer on cloud to avoid resource limits
+    
     results = []
     total = len(urls)
     start = time.time()
@@ -163,7 +175,6 @@ async def process_urls(urls, max_wait, headless, progress_callback=None):
 
         elapsed = time.time() - start
         eta = (elapsed / (i+1)) * (total - i - 1) if i < total-1 else 0
-
         success = sum(1 for r in results if r["Status"] == "Success")
 
         if progress_callback:
@@ -238,4 +249,4 @@ if uploaded_file is not None:
         st.error(f"Error reading file: {str(e)}")
 
 st.markdown("---")
-st.caption("**2026 Notes:** Visible mode for local debug only (e.g., manual captcha). On cloud: Always headless. High Cloudflare failure rate expected.")
+st.caption("**2026 Notes:** Visible mode for local debug only. On cloud: Always headless. Cloudflare blocks many requests → expect partial success. Check the 'Debug' column for clues.")
