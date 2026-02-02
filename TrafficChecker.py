@@ -85,7 +85,6 @@ def create_driver(headless_mode=True):
             raise Exception(f"Failed to create driver: {str(e2)}")
 
 # ── Scraping function ────────────────────────────────────────────────────────
-# ── Scraping function ────────────────────────────────────────────────────────
 def scrape_ahrefs_traffic(driver, url, max_wait):
     result = {
         "URL": url,
@@ -99,13 +98,13 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
         full_url = f"https://ahrefs.com/traffic-checker/?input={url}&mode=subdomains"
        
         driver.get(full_url)
-        time.sleep(6)  # Increased initial wait
-       
-        # Check for Cloudflare (unchanged)
+        time.sleep(6)  # generous initial wait
+
+        # Cloudflare check (unchanged)
         page_source = driver.page_source.lower()
         if "cloudflare" in page_source or "just a moment" in page_source or "checking your browser" in page_source:
             result["Debug"] = "CF detected - waiting..."
-            max_cf_wait = min(max_wait, 30)
+            max_cf_wait = min(max_wait, 35)
             start_cf = time.time()
             cleared = False
             while time.time() - start_cf < max_cf_wait:
@@ -122,29 +121,63 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
                         break
                 except:
                     pass
-                time.sleep(2)
+                time.sleep(2.5)
             if not cleared:
-                result["Debug"] = "CF blocked"
+                result["Debug"] += " | CF blocked"
                 result["Status"] = "Blocked by Cloudflare"
                 return result
-       
-        # ── NEW WAIT: Wait for the actual results overlay (2026 version) ──
+
+        # ────────────────────────────────────────────────────────────────
+        #   IMPROVED WAIT LOGIC - layered & more patient
+        # ────────────────────────────────────────────────────────────────
+        found = False
+        debug_parts = []
+
+        # Phase 1: Wait for overlay presence (fast check)
         try:
-            WebDriverWait(driver, max_wait).until(
-                EC.any_of(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, ".css-hv2zbw-overlay")),  # main overlay
-                    EC.presence_of_element_located((By.XPATH, "//p[contains(text(), 'Organic traffic of')]"))
+            WebDriverWait(driver, 45).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, ".css-hv2zbw-overlay"))
+            )
+            debug_parts.append("overlay present")
+        except:
+            debug_parts.append("no overlay yet")
+
+        # Phase 2: Wait for the header text (most reliable indicator)
+        try:
+            WebDriverWait(driver, max_wait - 30).until(
+                EC.presence_of_element_located(
+                    (By.XPATH, "//p[contains(., 'Organic traffic of')]")
                 )
             )
-            result["Debug"] += " | Results modal appeared"
-        except TimeoutException:
-            result["Debug"] += " | Results modal NEVER appeared"
-            result["Status"] = "Modal timeout"
-            return result
-       
-        time.sleep(4)  # Let numbers fully render
+            found = True
+            debug_parts.append("header text found")
+        except:
+            debug_parts.append("header text timeout")
 
-        # ── NEW SELECTORS (2026 working) ─────────────────────────────────────
+        # Phase 3: Fallback - look for the big number spans (0 or $0)
+        if not found:
+            try:
+                WebDriverWait(driver, 60).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, ".css-mbu6n8"))
+                )
+                found = True
+                debug_parts.append("big numbers appeared (fallback)")
+            except:
+                debug_parts.append("big numbers also missing")
+
+        result["Debug"] += " | " + " | ".join(debug_parts)
+
+        if not found:
+            result["Debug"] += " | Results NEVER fully loaded"
+            result["Status"] = "Modal timeout - no data"
+            return result
+
+        # Give extra time for numbers / DR bars to settle
+        time.sleep(4)
+
+        # ────────────────────────────────────────────────────────────────
+        #   EXTRACTION (same logic, but now guaranteed elements exist)
+        # ────────────────────────────────────────────────────────────────
         def safe_extract(selector_type, selector_value, field_name):
             try:
                 if selector_type == "xpath":
@@ -152,13 +185,12 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
                 else:
                     elem = driver.find_element(By.CSS_SELECTOR, selector_value)
                 
-                text = elem.text.strip()
-                if not text:
-                    text = elem.get_attribute("innerText") or elem.get_attribute("textContent") or ""
-                text = text.strip()
+                text = (elem.text or elem.get_attribute("innerText") or 
+                       elem.get_attribute("textContent") or "").strip()
 
                 if text and text not in ["", "N/A"]:
-                    reject_list = ["Check any website", "Ahrefs", "SEO Tools", "Keywords Explorer", "Site Explorer"]
+                    reject_list = ["Check any website", "Ahrefs", "SEO Tools", 
+                                 "Keywords Explorer", "Site Explorer"]
                     if any(rej.lower() in text.lower() for rej in reject_list) and len(text) < 50:
                         return "N/A"
                     return text
@@ -166,59 +198,52 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
             except:
                 return "N/A"
 
-        # 1. Website Name → from header text
-        website_name = safe_extract("xpath", "//p[contains(text(), 'Organic traffic of')]", "Website Name")
-        if website_name != "N/A":
-            # Extract domain from "Organic traffic of https://example.com/"
-            match = re.search(r'https?://([^/]+)', website_name)
+        # Website Name from header
+        header_text = safe_extract("xpath", "//p[contains(., 'Organic traffic of')]", "Header")
+        if header_text != "N/A":
+            import re
+            match = re.search(r'https?://([^/\s]+)', header_text)
             if match:
                 result["Website Name"] = match.group(1)
-                result["Debug"] += " | Name OK"
+                result["Debug"] += " | Name extracted"
             else:
-                result["Website Name"] = website_name.split("of")[-1].strip().strip('/')
+                result["Website Name"] = header_text.split("of")[-1].strip().rstrip('/')
                 result["Debug"] += " | Name fallback"
-        else:
-            result["Debug"] += " | Name N/A"
 
-        # 2. Organic Traffic → first big number WITHOUT $
-        traffic_candidates = driver.find_elements(By.CSS_SELECTOR, ".css-mbu6n8")
+        # Traffic & Worth via .css-mbu6n8 spans
+        numbers = driver.find_elements(By.CSS_SELECTOR, ".css-mbu6n8")
         traffic_value = "N/A"
         worth_value = "N/A"
-        
-        for cand in traffic_candidates:
-            txt = cand.text.strip()
-            if txt and txt != "0" and "$" not in txt and any(c.isdigit() for c in txt):
-                if traffic_value == "N/A":
+
+        for el in numbers:
+            txt = (el.text or "").strip()
+            if txt:
+                if "$" in txt:
+                    worth_value = txt
+                elif any(c.isdigit() for c in txt):
                     traffic_value = txt
-            elif txt and "$" in txt:
-                worth_value = txt
 
         if traffic_value != "N/A":
             result["Organic Traffic"] = traffic_value
             result["Debug"] += " | Traffic OK"
-        else:
-            result["Debug"] += " | Traffic N/A"
-
         if worth_value != "N/A":
             result["Traffic Worth"] = worth_value
             result["Debug"] += " | Worth OK"
-        else:
-            result["Debug"] += " | Worth N/A"
 
         # Final status
-        if result["Organic Traffic"] != "N/A" or result["Website Name"] != "N/A" or result["Traffic Worth"] != "N/A":
+        if any(v != "N/A" for v in [result["Website Name"], result["Organic Traffic"], result["Traffic Worth"]]):
             result["Status"] = "Success"
         else:
             result["Status"] = "No valid data"
-            result["Debug"] += " | All fields empty"
+            result["Debug"] += " | All fields still N/A"
 
     except WebDriverException as e:
         result["Status"] = "Driver Error"
-        result["Debug"] = f"Driver crash: {str(e)[:80]}"
+        result["Debug"] = f"Driver crash: {str(e)[:120]}"
     except Exception as e:
         result["Status"] = "Error"
-        result["Debug"] = f"Error: {str(e)[:80]}"
-   
+        result["Debug"] = f"Exception: {str(e)[:120]}"
+
     return result
 
 # ── Batch processing with driver restart logic ──────────────────────────────
@@ -406,4 +431,5 @@ st.markdown("""
 2. **Organic Traffic**: `.ReactModalPortal > div > ... > span` (converted from your CSS path)
 3. **Traffic Worth**: `.ReactModalPortal > div > ... > span` (converted from your CSS path)
 """)
+
 
