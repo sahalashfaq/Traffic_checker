@@ -138,36 +138,41 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
                 result["Status"] = "Blocked by Cloudflare"
                 return result
         
-        # Wait for the modal to appear
+        # Wait for the ReactModalPortal to appear
         try:
-            WebDriverWait(driver, max_wait).until(
+            modal = WebDriverWait(driver, max_wait).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, ".ReactModalPortal"))
             )
-            result["Debug"] += " | Modal OK"
+            result["Debug"] += " | Modal found"
         except TimeoutException:
-            # Try alternative selectors
-            try:
-                WebDriverWait(driver, 5).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "[class*='Modal']"))
-                )
-                result["Debug"] += " | Modal OK (alt)"
-            except:
-                result["Debug"] += " | Modal FAIL"
-                result["Status"] = "Modal not found"
-                return result
+            result["Debug"] += " | Modal NOT found"
+            result["Status"] = "Modal not found"
+            return result
         
         # Give extra time for data to populate
         time.sleep(4)
         
-        # Helper function to extract text using multiple methods
-        def get_text_multi(xpaths_and_css):
-            """Try multiple selectors and extraction methods"""
-            for selector_type, selector_value in xpaths_and_css:
+        # Re-find modal to ensure it's fresh
+        try:
+            modal = driver.find_element(By.CSS_SELECTOR, ".ReactModalPortal")
+        except:
+            result["Debug"] += " | Modal disappeared"
+            result["Status"] = "Modal disappeared"
+            return result
+        
+        # Helper function to extract text ONLY from inside modal
+        def get_text_from_modal(selectors_relative_to_modal):
+            """Extract text from elements INSIDE the modal element only"""
+            for selector_type, selector_value in selectors_relative_to_modal:
                 try:
-                    if selector_type == "xpath":
-                        elem = driver.find_element(By.XPATH, selector_value)
-                    else:  # css
-                        elem = driver.find_element(By.CSS_SELECTOR, selector_value)
+                    # Find element RELATIVE to modal, not document
+                    if selector_type == "xpath_relative":
+                        # XPath relative to modal (starts with .)
+                        elem = modal.find_element(By.XPATH, selector_value)
+                    elif selector_type == "css":
+                        elem = modal.find_element(By.CSS_SELECTOR, selector_value)
+                    else:
+                        continue
                     
                     # Try multiple text extraction methods
                     text = elem.text.strip()
@@ -188,45 +193,65 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
                     continue
             return "N/A"
         
-        # Extract Website Name - multiple selectors
+        # Extract Website Name - ONLY from modal
+        # Using relative XPaths that work from modal element
         website_selectors = [
-            ("xpath", "/html/body/div[6]/div/div/div/div/div[1]/div/div[1]/p"),
-            ("css", ".ReactModalPortal h2"),
-            ("xpath", "//div[contains(@class,'ReactModalPortal')]//h2"),
-            ("xpath", "//div[contains(@class,'ReactModalPortal')]//p[1]"),
-            ("css", ".ReactModalPortal p:first-of-type"),
-            ("xpath", "//h2[contains(@class,'')]"),
+            ("css", "p"),  # First p tag inside modal
+            ("css", "h2"),  # Or h2 tag
+            ("xpath_relative", ".//p[1]"),
+            ("xpath_relative", ".//h2"),
+            ("xpath_relative", ".//div[1]/div/div[1]/p"),
         ]
-        result["Website Name"] = get_text_multi(website_selectors)
+        result["Website Name"] = get_text_from_modal(website_selectors)
         
-        # Extract Organic Traffic - multiple selectors
+        # Extract Organic Traffic - ONLY from modal
+        # Looking for spans with K/M/B numbers inside modal
         traffic_selectors = [
-            ("xpath", "/html/body/div[6]/div/div/div/div/div[2]/div[1]/div[1]/div/div/div[1]/div[1]/div[2]/div/div/div/span"),
-            ("xpath", "//div[contains(@class,'ReactModalPortal')]//span[contains(text(),'K') or contains(text(),'M') or contains(text(),'B')]"),
+            ("xpath_relative", ".//div[2]/div[1]/div[1]/div/div/div[1]/div[1]/div[2]/div/div/div/span"),
+            ("xpath_relative", ".//span[contains(text(),'K') or contains(text(),'M') or contains(text(),'B')][1]"),
             ("css", "span[class*='css-vemh4e']"),
-            ("xpath", "//div[2]/div[1]/div[1]/div/div/div[1]/div[1]/div[2]/div/div/div/span"),
-            ("xpath", "//span[contains(text(),'K') or contains(text(),'M') or contains(text(),'B')][1]"),
-            ("xpath", "//div[contains(@class,'traffic')]//span"),
+            ("xpath_relative", ".//div[contains(@class,'traffic')]//span[contains(text(),'K') or contains(text(),'M') or contains(text(),'B')]"),
+            ("xpath_relative", ".//span[contains(text(),'K')][1]"),
+            ("xpath_relative", ".//span[contains(text(),'M')][1]"),
         ]
-        result["Organic Traffic"] = get_text_multi(traffic_selectors)
+        result["Organic Traffic"] = get_text_from_modal(traffic_selectors)
         
-        # Extract Traffic Worth - multiple selectors
+        # Extract Traffic Worth - ONLY from modal
+        # Looking for spans with $ inside modal
         worth_selectors = [
-            ("xpath", "/html/body/div[6]/div/div/div/div/div[2]/div[1]/div[1]/div/div/div[1]/div[2]/div[2]/div/div/div/span"),
-            ("xpath", "//span[starts-with(text(),'$')]"),
+            ("xpath_relative", ".//div[2]/div[1]/div[1]/div/div/div[1]/div[2]/div[2]/div/div/div/span"),
+            ("xpath_relative", ".//span[starts-with(text(),'$')][1]"),
             ("css", "span[class*='css-6s0ffe']"),
-            ("xpath", "//span[contains(text(),'$')][1]"),
-            ("xpath", "//div[2]/div[1]/div[1]/div/div/div[1]/div[2]/div[2]/div/div/div/span"),
+            ("xpath_relative", ".//span[contains(text(),'$')][1]"),
         ]
-        result["Traffic Worth"] = get_text_multi(worth_selectors)
+        result["Traffic Worth"] = get_text_from_modal(worth_selectors)
+        
+        # Additional validation: check if we got real data or junk
+        if result["Website Name"] != "N/A":
+            # Filter out common junk text
+            junk_keywords = ["check any website", "keywords explorer", "browser extension", 
+                           "sign up", "login", "try for free", "get started"]
+            website_lower = result["Website Name"].lower()
+            if any(junk in website_lower for junk in junk_keywords):
+                result["Website Name"] = "N/A"
+                result["Debug"] += " | Wrong modal data detected"
         
         # Check if we got meaningful data
         if result["Organic Traffic"] != "N/A" or result["Website Name"] != "N/A":
-            result["Status"] = "Success"
-            result["Debug"] += " | Data OK"
+            # Additional check: Organic Traffic should contain numbers
+            if result["Organic Traffic"] != "N/A":
+                if any(char.isdigit() for char in result["Organic Traffic"]):
+                    result["Status"] = "Success"
+                    result["Debug"] += " | Data OK"
+                else:
+                    result["Status"] = "Invalid data"
+                    result["Debug"] += " | Traffic has no numbers"
+            else:
+                result["Status"] = "Partial data"
+                result["Debug"] += " | Only website name found"
         else:
             result["Status"] = "No data found"
-            result["Debug"] += " | Data FAIL"
+            result["Debug"] += " | All selectors failed"
     
     except WebDriverException as e:
         result["Status"] = "Driver Error"
@@ -319,13 +344,13 @@ async def process_urls(urls, max_wait, headless, progress_callback=None):
 st.set_page_config(page_title="Ahrefs Traffic Bulk Checker", layout="centered")
 
 st.title("🔍 Ahrefs Traffic Checker – Bulk Extraction")
-st.caption("2026 Cloud Version • Auto Driver Restart • Multi-Selector Fallback")
+st.caption("2026 Cloud Version • ReactModalPortal-Only Extraction • Junk Data Filter")
 
 # Show initialization message
 with st.expander("ℹ️ System Info", expanded=False):
-    st.write("- **Driver**: Auto-restart on failure")
-    st.write("- **Selectors**: Multiple XPath + CSS fallbacks")
-    st.write("- **Cloudflare**: 30s clearance timeout")
+    st.write("- **Target**: Only extracts from .ReactModalPortal")
+    st.write("- **Filtering**: Removes promotional/extension popups")
+    st.write("- **Validation**: Checks traffic has numbers")
     st.write("- **Mode**: Headless on cloud, visible locally")
 
 # Controls
@@ -412,8 +437,8 @@ if uploaded_file is not None:
 st.markdown("---")
 st.markdown("""
 ### ℹ️ Debug Guide
-- **"Driver crash"**: ChromeDriver died, will auto-restart
-- **"CF blocked"**: Cloudflare challenge failed
-- **"Data FAIL"**: Modal loaded but selectors didn't find data
-- **"Modal FAIL"**: Page didn't render the popup
+- **"Wrong modal data detected"**: Found promotional popup instead of traffic data
+- **"Traffic has no numbers"**: Found text but not traffic metrics
+- **"All selectors failed"**: Modal structure might have changed
+- **"Modal disappeared"**: Modal closed before data extraction
 """)
