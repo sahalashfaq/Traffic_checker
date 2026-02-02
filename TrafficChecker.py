@@ -38,8 +38,11 @@ def init_driver(headless_mode=True):
     
     # Stealth / anti-bot flags to help bypass Cloudflare
     options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option('useAutomationExtension', False)
+    
+    # REMOVED: Let undetected_chromedriver handle these internally
+    # options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    # options.add_experimental_option('useAutomationExtension', False)
+    
     options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -51,14 +54,13 @@ def init_driver(headless_mode=True):
         st.warning("Visible mode disabled on Streamlit Cloud (no display server). Running headless.")
     
     if headless_mode:
-        options.add_argument("--headless=new")  # Fixed: use --headless=new for better compatibility
+        options.add_argument("--headless=new")
     else:
         st.warning("Visible mode: Browser will appear (local debugging only). Solve captchas manually if needed.")
     
     try:
-        # Use undetected_chromedriver with version matching Cloud's Chromium (~144.x)
-        # This patches the driver to reduce detection in headless mode
-        driver = uc.Chrome(version_main=144, options=options)
+        # FIXED: Removed version_main parameter, added use_subprocess for stability
+        driver = uc.Chrome(options=options, use_subprocess=True)
         
         if not headless_mode:
             driver.maximize_window()
