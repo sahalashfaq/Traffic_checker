@@ -1,6 +1,6 @@
+setuptools>=65.0.0
 streamlit
 pandas
 openpyxl
 selenium
-undetected-chromedriver>=3.5.0
-setuptools>=65.0.0
+undetected-chromedriver
