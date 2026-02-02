@@ -100,7 +100,7 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
         
         # Navigate to URL
         driver.get(full_url)
-        time.sleep(4)
+        time.sleep(5)
         
         # Check for Cloudflare challenge
         page_source = driver.page_source.lower()
@@ -125,7 +125,7 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
                     current_source = driver.page_source.lower()
                     if "cloudflare" not in current_source and "just a moment" not in current_source:
                         cleared = True
-                        result["Debug"] = "CF cleared (content)"
+                        result["Debug"] = "CF cleared"
                         break
                         
                 except:
@@ -138,9 +138,9 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
                 result["Status"] = "Blocked by Cloudflare"
                 return result
         
-        # Wait for the ReactModalPortal to appear
+        # Wait for the ReactModalPortal specifically
         try:
-            modal = WebDriverWait(driver, max_wait).until(
+            WebDriverWait(driver, max_wait).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, ".ReactModalPortal"))
             )
             result["Debug"] += " | Modal found"
@@ -149,109 +149,118 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
             result["Status"] = "Modal not found"
             return result
         
-        # Give extra time for data to populate
-        time.sleep(4)
+        # Give extra time for data to populate inside modal
+        time.sleep(5)
         
-        # Re-find modal to ensure it's fresh
-        try:
-            modal = driver.find_element(By.CSS_SELECTOR, ".ReactModalPortal")
-        except:
-            result["Debug"] += " | Modal disappeared"
-            result["Status"] = "Modal disappeared"
-            return result
-        
-        # Helper function to extract text ONLY from inside modal
-        def get_text_from_modal(selectors_relative_to_modal):
-            """Extract text from elements INSIDE the modal element only"""
-            for selector_type, selector_value in selectors_relative_to_modal:
-                try:
-                    # Find element RELATIVE to modal, not document
-                    if selector_type == "xpath_relative":
-                        # XPath relative to modal (starts with .)
-                        elem = modal.find_element(By.XPATH, selector_value)
-                    elif selector_type == "css":
-                        elem = modal.find_element(By.CSS_SELECTOR, selector_value)
-                    else:
-                        continue
-                    
-                    # Try multiple text extraction methods
-                    text = elem.text.strip()
-                    if text:
-                        return text
-                    
-                    # Try innerText
+        # STRICT: Only use the exact selectors provided
+        # Helper function to extract text with validation
+        def safe_extract(selector_type, selector_value, field_name):
+            """Extract text and validate it's actually from the modal data"""
+            try:
+                if selector_type == "xpath":
+                    elem = driver.find_element(By.XPATH, selector_value)
+                else:  # css
+                    elem = driver.find_element(By.CSS_SELECTOR, selector_value)
+                
+                # Try multiple text extraction methods
+                text = elem.text.strip()
+                if not text:
                     text = elem.get_attribute("innerText")
-                    if text and text.strip():
-                        return text.strip()
-                    
-                    # Try textContent
+                    if text:
+                        text = text.strip()
+                if not text:
                     text = elem.get_attribute("textContent")
-                    if text and text.strip():
-                        return text.strip()
+                    if text:
+                        text = text.strip()
+                
+                # Validate the text is NOT Ahrefs UI elements
+                if text and text not in ["", "N/A"]:
+                    # Reject common Ahrefs UI text
+                    reject_list = [
+                        "Check any website",
+                        "Keywords Explorer",
+                        "Site Explorer",
+                        "Content Explorer",
+                        "Rank Tracker",
+                        "Site Audit",
+                        "Ahrefs",
+                        "SEO Tools",
+                        "Backlinks",
+                        "organic",
+                        "traffic",
+                        "worth"
+                    ]
                     
-                except Exception as e:
-                    continue
-            return "N/A"
+                    text_lower = text.lower()
+                    for reject in reject_list:
+                        if reject.lower() in text_lower and len(text) < 50:
+                            # This is likely UI text, not data
+                            return "N/A"
+                    
+                    return text
+                
+                return "N/A"
+                
+            except Exception as e:
+                return "N/A"
         
-        # Extract Website Name - ONLY from modal
-        # Using relative XPaths that work from modal element
-        website_selectors = [
-            ("css", "p"),  # First p tag inside modal
-            ("css", "h2"),  # Or h2 tag
-            ("xpath_relative", ".//p[1]"),
-            ("xpath_relative", ".//h2"),
-            ("xpath_relative", ".//div[1]/div/div[1]/p"),
-        ]
-        result["Website Name"] = get_text_from_modal(website_selectors)
+        # EXACT SELECTOR 1: Website Name
+        # XPath: /html/body/div[6]/div/div/div/div/div[1]/div/div[1]/p
+        website_xpath = "/html/body/div[6]/div/div/div/div/div[1]/div/div[1]/p"
+        website_name = safe_extract("xpath", website_xpath, "Website Name")
         
-        # Extract Organic Traffic - ONLY from modal
-        # Looking for spans with K/M/B numbers inside modal
-        traffic_selectors = [
-            ("xpath_relative", ".//div[2]/div[1]/div[1]/div/div/div[1]/div[1]/div[2]/div/div/div/span"),
-            ("xpath_relative", ".//span[contains(text(),'K') or contains(text(),'M') or contains(text(),'B')][1]"),
-            ("css", "span[class*='css-vemh4e']"),
-            ("xpath_relative", ".//div[contains(@class,'traffic')]//span[contains(text(),'K') or contains(text(),'M') or contains(text(),'B')]"),
-            ("xpath_relative", ".//span[contains(text(),'K')][1]"),
-            ("xpath_relative", ".//span[contains(text(),'M')][1]"),
-        ]
-        result["Organic Traffic"] = get_text_from_modal(traffic_selectors)
-        
-        # Extract Traffic Worth - ONLY from modal
-        # Looking for spans with $ inside modal
-        worth_selectors = [
-            ("xpath_relative", ".//div[2]/div[1]/div[1]/div/div/div[1]/div[2]/div[2]/div/div/div/span"),
-            ("xpath_relative", ".//span[starts-with(text(),'$')][1]"),
-            ("css", "span[class*='css-6s0ffe']"),
-            ("xpath_relative", ".//span[contains(text(),'$')][1]"),
-        ]
-        result["Traffic Worth"] = get_text_from_modal(worth_selectors)
-        
-        # Additional validation: check if we got real data or junk
-        if result["Website Name"] != "N/A":
-            # Filter out common junk text
-            junk_keywords = ["check any website", "keywords explorer", "browser extension", 
-                           "sign up", "login", "try for free", "get started"]
-            website_lower = result["Website Name"].lower()
-            if any(junk in website_lower for junk in junk_keywords):
-                result["Website Name"] = "N/A"
-                result["Debug"] += " | Wrong modal data detected"
-        
-        # Check if we got meaningful data
-        if result["Organic Traffic"] != "N/A" or result["Website Name"] != "N/A":
-            # Additional check: Organic Traffic should contain numbers
-            if result["Organic Traffic"] != "N/A":
-                if any(char.isdigit() for char in result["Organic Traffic"]):
-                    result["Status"] = "Success"
-                    result["Debug"] += " | Data OK"
-                else:
-                    result["Status"] = "Invalid data"
-                    result["Debug"] += " | Traffic has no numbers"
+        # Validate it looks like a domain/website name
+        if website_name != "N/A":
+            # Should contain domain-like text
+            if "." in website_name or "www" in website_name.lower() or len(website_name) > 4:
+                result["Website Name"] = website_name
+                result["Debug"] += " | Name OK"
             else:
-                result["Status"] = "Partial data"
-                result["Debug"] += " | Only website name found"
+                result["Debug"] += " | Name invalid"
         else:
-            result["Status"] = "No data found"
-            result["Debug"] += " | All selectors failed"
+            result["Debug"] += " | Name N/A"
+        
+        # EXACT SELECTOR 2: Organic Traffic
+        # CSS: .ReactModalPortal/div/div/div/div/div[2]/div[1]/div[1]/div/div/div[1]/div[1]/div[2]/div/div/div/span
+        # Convert to proper CSS selector
+        traffic_css = ".ReactModalPortal > div > div > div > div > div:nth-child(2) > div:nth-child(1) > div:nth-child(1) > div > div > div:nth-child(1) > div:nth-child(1) > div:nth-child(2) > div > div > div > span"
+        traffic_value = safe_extract("css", traffic_css, "Organic Traffic")
+        
+        # Validate it looks like traffic numbers (contains K, M, B, or numbers)
+        if traffic_value != "N/A":
+            if any(char in traffic_value for char in ['K', 'M', 'B', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9']):
+                # Should NOT contain dollar sign (that's worth, not traffic)
+                if '$' not in traffic_value:
+                    result["Organic Traffic"] = traffic_value
+                    result["Debug"] += " | Traffic OK"
+                else:
+                    result["Debug"] += " | Traffic has $"
+            else:
+                result["Debug"] += " | Traffic invalid"
+        else:
+            result["Debug"] += " | Traffic N/A"
+        
+        # EXACT SELECTOR 3: Traffic Worth
+        # CSS: .ReactModalPortal/div/div/div/div/div[2]/div[1]/div[1]/div/div/div[1]/div[2]/div[2]/div/div/div/span
+        worth_css = ".ReactModalPortal > div > div > div > div > div:nth-child(2) > div:nth-child(1) > div:nth-child(1) > div > div > div:nth-child(1) > div:nth-child(2) > div:nth-child(2) > div > div > div > span"
+        worth_value = safe_extract("css", worth_css, "Traffic Worth")
+        
+        # Validate it looks like money (contains $)
+        if worth_value != "N/A":
+            if '$' in worth_value:
+                result["Traffic Worth"] = worth_value
+                result["Debug"] += " | Worth OK"
+            else:
+                result["Debug"] += " | Worth no $"
+        else:
+            result["Debug"] += " | Worth N/A"
+        
+        # Final status
+        if result["Organic Traffic"] != "N/A" or result["Website Name"] != "N/A" or result["Traffic Worth"] != "N/A":
+            result["Status"] = "Success"
+        else:
+            result["Status"] = "No valid data"
+            result["Debug"] += " | All fields empty/invalid"
     
     except WebDriverException as e:
         result["Status"] = "Driver Error"
@@ -329,7 +338,7 @@ async def process_urls(urls, max_wait, headless, progress_callback=None):
             progress_callback(i+1, total, success, round(eta/60, 1), results)
         
         # Small delay between requests
-        time.sleep(2)
+        time.sleep(3)
 
     # Cleanup
     if driver:
@@ -344,14 +353,14 @@ async def process_urls(urls, max_wait, headless, progress_callback=None):
 st.set_page_config(page_title="Ahrefs Traffic Bulk Checker", layout="centered")
 
 st.title("🔍 Ahrefs Traffic Checker – Bulk Extraction")
-st.caption("2026 Cloud Version • ReactModalPortal-Only Extraction • Junk Data Filter")
+st.caption("2026 Cloud Version • Strict Validation • Exact Selectors Only")
 
 # Show initialization message
 with st.expander("ℹ️ System Info", expanded=False):
-    st.write("- **Target**: Only extracts from .ReactModalPortal")
-    st.write("- **Filtering**: Removes promotional/extension popups")
-    st.write("- **Validation**: Checks traffic has numbers")
-    st.write("- **Mode**: Headless on cloud, visible locally")
+    st.write("- **Selectors**: Using EXACT paths provided")
+    st.write("- **Validation**: Rejects Ahrefs UI text, only accepts data")
+    st.write("- **Wait time**: 5s after modal for data to populate")
+    st.write("- **Driver**: Auto-restart on failure")
 
 # Controls
 col1, col2, col3 = st.columns([3, 2, 2])
@@ -437,8 +446,13 @@ if uploaded_file is not None:
 st.markdown("---")
 st.markdown("""
 ### ℹ️ Debug Guide
-- **"Wrong modal data detected"**: Found promotional popup instead of traffic data
-- **"Traffic has no numbers"**: Found text but not traffic metrics
-- **"All selectors failed"**: Modal structure might have changed
-- **"Modal disappeared"**: Modal closed before data extraction
+- **"Name invalid"**: Found text but doesn't look like a domain
+- **"Traffic has $"**: Traffic selector grabbed worth instead
+- **"Worth no $"**: Worth selector grabbed traffic instead
+- **"All fields empty/invalid"**: Modal loaded but data validation failed
+
+### 📍 Exact Selectors Being Used:
+1. **Website Name**: `/html/body/div[6]/div/div/div/div/div[1]/div/div[1]/p`
+2. **Organic Traffic**: `.ReactModalPortal > div > ... > span` (converted from your CSS path)
+3. **Traffic Worth**: `.ReactModalPortal > div > ... > span` (converted from your CSS path)
 """)
