@@ -39,13 +39,9 @@ def init_driver(headless_mode=True):
     # Stealth / anti-bot flags to help bypass Cloudflare
     options.add_argument("--disable-blink-features=AutomationControlled")
     
-    # REMOVED: Let undetected_chromedriver handle these internally
-    # options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    # options.add_experimental_option('useAutomationExtension', False)
-    
     options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
     )
     
     # Force headless on cloud
@@ -59,8 +55,14 @@ def init_driver(headless_mode=True):
         st.warning("Visible mode: Browser will appear (local debugging only). Solve captchas manually if needed.")
     
     try:
-        # FIXED: Removed version_main parameter, added use_subprocess for stability
-        driver = uc.Chrome(options=options, use_subprocess=True)
+        # FIXED: Explicitly specify version 144 to match installed Chromium
+        # use_subprocess=True for better stability on cloud environments
+        driver = uc.Chrome(
+            version_main=144,
+            options=options,
+            use_subprocess=True,
+            driver_executable_path=None  # Let it auto-download the correct version
+        )
         
         if not headless_mode:
             driver.maximize_window()
@@ -69,8 +71,18 @@ def init_driver(headless_mode=True):
     except Exception as e:
         st.error("Chromium driver failed to start")
         st.error(str(e))
-        st.error("Tip: Check backend logs. Common: version mismatch or Cloudflare still blocking. Consider proxies for high success.")
-        st.stop()
+        
+        # Try fallback without version specification
+        try:
+            st.info("Attempting fallback: auto-detecting Chrome version...")
+            driver = uc.Chrome(options=options, use_subprocess=True)
+            if not headless_mode:
+                driver.maximize_window()
+            return driver
+        except Exception as e2:
+            st.error(f"Fallback also failed: {str(e2)}")
+            st.error("Tip: ChromeDriver version must match Chromium version. Check if Chromium updated on cloud.")
+            st.stop()
 
 # ── Scraping function ────────────────────────────────────────────────────────
 def scrape_ahrefs_traffic(driver, url, max_wait):
@@ -250,4 +262,4 @@ if uploaded_file is not None:
         st.error(f"Error reading file: {str(e)}")
 
 st.markdown("---")
-st.caption("**2026 Notes:** Switched to undetected-chromedriver to fix headless detection issues. Visible mode for local captcha solving. On cloud: headless only, success rate improved but still expect some Cloudflare blocks. Check 'Debug' column.")
+st.caption("**2026 Notes:** Using undetected-chromedriver v144 to match Chromium. Includes fallback for version auto-detection. On cloud: headless only. Check 'Debug' column for Cloudflare status.")
