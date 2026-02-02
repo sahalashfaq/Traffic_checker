@@ -85,6 +85,7 @@ def create_driver(headless_mode=True):
             raise Exception(f"Failed to create driver: {str(e2)}")
 
 # ── Scraping function ────────────────────────────────────────────────────────
+# ── Scraping function ────────────────────────────────────────────────────────
 def scrape_ahrefs_traffic(driver, url, max_wait):
     result = {
         "URL": url,
@@ -94,181 +95,130 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
         "Status": "Failed",
         "Debug": ""
     }
-
     try:
         full_url = f"https://ahrefs.com/traffic-checker/?input={url}&mode=subdomains"
-        
-        # Navigate to URL
+       
         driver.get(full_url)
-        time.sleep(5)
-        
-        # Check for Cloudflare challenge
+        time.sleep(6)  # Increased initial wait
+       
+        # Check for Cloudflare (unchanged)
         page_source = driver.page_source.lower()
         if "cloudflare" in page_source or "just a moment" in page_source or "checking your browser" in page_source:
             result["Debug"] = "CF detected - waiting..."
-            
-            # Wait longer for Cloudflare
             max_cf_wait = min(max_wait, 30)
             start_cf = time.time()
             cleared = False
-            
             while time.time() - start_cf < max_cf_wait:
                 try:
-                    # Check if cf_clearance cookie exists
                     cookies = driver.get_cookies()
                     if any(c.get('name') == 'cf_clearance' for c in cookies):
                         cleared = True
                         result["Debug"] = "CF cleared"
                         break
-                    
-                    # Check if page content changed
                     current_source = driver.page_source.lower()
                     if "cloudflare" not in current_source and "just a moment" not in current_source:
                         cleared = True
                         result["Debug"] = "CF cleared"
                         break
-                        
                 except:
                     pass
-                
                 time.sleep(2)
-            
             if not cleared:
                 result["Debug"] = "CF blocked"
                 result["Status"] = "Blocked by Cloudflare"
                 return result
-        
-        # Wait for the ReactModalPortal specifically
+       
+        # ── NEW WAIT: Wait for the actual results overlay (2026 version) ──
         try:
             WebDriverWait(driver, max_wait).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".ReactModalPortal"))
+                EC.any_of(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, ".css-hv2zbw-overlay")),  # main overlay
+                    EC.presence_of_element_located((By.XPATH, "//p[contains(text(), 'Organic traffic of')]"))
+                )
             )
-            result["Debug"] += " | Modal found"
+            result["Debug"] += " | Results modal appeared"
         except TimeoutException:
-            result["Debug"] += " | Modal NOT found"
-            result["Status"] = "Modal not found"
+            result["Debug"] += " | Results modal NEVER appeared"
+            result["Status"] = "Modal timeout"
             return result
-        
-        # Give extra time for data to populate inside modal
-        time.sleep(5)
-        
-        # STRICT: Only use the exact selectors provided
-        # Helper function to extract text with validation
+       
+        time.sleep(4)  # Let numbers fully render
+
+        # ── NEW SELECTORS (2026 working) ─────────────────────────────────────
         def safe_extract(selector_type, selector_value, field_name):
-            """Extract text and validate it's actually from the modal data"""
             try:
                 if selector_type == "xpath":
                     elem = driver.find_element(By.XPATH, selector_value)
-                else:  # css
+                else:
                     elem = driver.find_element(By.CSS_SELECTOR, selector_value)
                 
-                # Try multiple text extraction methods
                 text = elem.text.strip()
                 if not text:
-                    text = elem.get_attribute("innerText")
-                    if text:
-                        text = text.strip()
-                if not text:
-                    text = elem.get_attribute("textContent")
-                    if text:
-                        text = text.strip()
-                
-                # Validate the text is NOT Ahrefs UI elements
+                    text = elem.get_attribute("innerText") or elem.get_attribute("textContent") or ""
+                text = text.strip()
+
                 if text and text not in ["", "N/A"]:
-                    # Reject common Ahrefs UI text
-                    reject_list = [
-                        "Check any website",
-                        "Keywords Explorer",
-                        "Site Explorer",
-                        "Content Explorer",
-                        "Rank Tracker",
-                        "Site Audit",
-                        "Ahrefs",
-                        "SEO Tools",
-                        "Backlinks",
-                        "organic",
-                        "traffic",
-                        "worth"
-                    ]
-                    
-                    text_lower = text.lower()
-                    for reject in reject_list:
-                        if reject.lower() in text_lower and len(text) < 50:
-                            # This is likely UI text, not data
-                            return "N/A"
-                    
+                    reject_list = ["Check any website", "Ahrefs", "SEO Tools", "Keywords Explorer", "Site Explorer"]
+                    if any(rej.lower() in text.lower() for rej in reject_list) and len(text) < 50:
+                        return "N/A"
                     return text
-                
                 return "N/A"
-                
-            except Exception as e:
+            except:
                 return "N/A"
-        
-        # EXACT SELECTOR 1: Website Name
-        # XPath: /html/body/div[6]/div/div/div/div/div[1]/div/div[1]/p
-        website_xpath = "/html/body/div[6]/div/div/div/div/div[1]/div/div[1]/p"
-        website_name = safe_extract("xpath", website_xpath, "Website Name")
-        
-        # Validate it looks like a domain/website name
+
+        # 1. Website Name → from header text
+        website_name = safe_extract("xpath", "//p[contains(text(), 'Organic traffic of')]", "Website Name")
         if website_name != "N/A":
-            # Should contain domain-like text
-            if "." in website_name or "www" in website_name.lower() or len(website_name) > 4:
-                result["Website Name"] = website_name
+            # Extract domain from "Organic traffic of https://example.com/"
+            match = re.search(r'https?://([^/]+)', website_name)
+            if match:
+                result["Website Name"] = match.group(1)
                 result["Debug"] += " | Name OK"
             else:
-                result["Debug"] += " | Name invalid"
+                result["Website Name"] = website_name.split("of")[-1].strip().strip('/')
+                result["Debug"] += " | Name fallback"
         else:
             result["Debug"] += " | Name N/A"
+
+        # 2. Organic Traffic → first big number WITHOUT $
+        traffic_candidates = driver.find_elements(By.CSS_SELECTOR, ".css-mbu6n8")
+        traffic_value = "N/A"
+        worth_value = "N/A"
         
-        # EXACT SELECTOR 2: Organic Traffic
-        # CSS: .ReactModalPortal/div/div/div/div/div[2]/div[1]/div[1]/div/div/div[1]/div[1]/div[2]/div/div/div/span
-        # Convert to proper CSS selector
-        traffic_css = ".ReactModalPortal > div > div > div > div > div:nth-child(2) > div:nth-child(1) > div:nth-child(1) > div > div > div:nth-child(1) > div:nth-child(1) > div:nth-child(2) > div > div > div > span"
-        traffic_value = safe_extract("css", traffic_css, "Organic Traffic")
-        
-        # Validate it looks like traffic numbers (contains K, M, B, or numbers)
+        for cand in traffic_candidates:
+            txt = cand.text.strip()
+            if txt and txt != "0" and "$" not in txt and any(c.isdigit() for c in txt):
+                if traffic_value == "N/A":
+                    traffic_value = txt
+            elif txt and "$" in txt:
+                worth_value = txt
+
         if traffic_value != "N/A":
-            if any(char in traffic_value for char in ['K', 'M', 'B', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9']):
-                # Should NOT contain dollar sign (that's worth, not traffic)
-                if '$' not in traffic_value:
-                    result["Organic Traffic"] = traffic_value
-                    result["Debug"] += " | Traffic OK"
-                else:
-                    result["Debug"] += " | Traffic has $"
-            else:
-                result["Debug"] += " | Traffic invalid"
+            result["Organic Traffic"] = traffic_value
+            result["Debug"] += " | Traffic OK"
         else:
             result["Debug"] += " | Traffic N/A"
-        
-        # EXACT SELECTOR 3: Traffic Worth
-        # CSS: .ReactModalPortal/div/div/div/div/div[2]/div[1]/div[1]/div/div/div[1]/div[2]/div[2]/div/div/div/span
-        worth_css = ".ReactModalPortal > div > div > div > div > div:nth-child(2) > div:nth-child(1) > div:nth-child(1) > div > div > div:nth-child(1) > div:nth-child(2) > div:nth-child(2) > div > div > div > span"
-        worth_value = safe_extract("css", worth_css, "Traffic Worth")
-        
-        # Validate it looks like money (contains $)
+
         if worth_value != "N/A":
-            if '$' in worth_value:
-                result["Traffic Worth"] = worth_value
-                result["Debug"] += " | Worth OK"
-            else:
-                result["Debug"] += " | Worth no $"
+            result["Traffic Worth"] = worth_value
+            result["Debug"] += " | Worth OK"
         else:
             result["Debug"] += " | Worth N/A"
-        
+
         # Final status
         if result["Organic Traffic"] != "N/A" or result["Website Name"] != "N/A" or result["Traffic Worth"] != "N/A":
             result["Status"] = "Success"
         else:
             result["Status"] = "No valid data"
-            result["Debug"] += " | All fields empty/invalid"
-    
+            result["Debug"] += " | All fields empty"
+
     except WebDriverException as e:
         result["Status"] = "Driver Error"
         result["Debug"] = f"Driver crash: {str(e)[:80]}"
     except Exception as e:
         result["Status"] = "Error"
         result["Debug"] = f"Error: {str(e)[:80]}"
-    
+   
     return result
 
 # ── Batch processing with driver restart logic ──────────────────────────────
@@ -456,3 +406,4 @@ st.markdown("""
 2. **Organic Traffic**: `.ReactModalPortal > div > ... > span` (converted from your CSS path)
 3. **Traffic Worth**: `.ReactModalPortal > div > ... > span` (converted from your CSS path)
 """)
+
