@@ -94,14 +94,9 @@ def init_driver(headless_mode=True):
 def scrape_ahrefs_traffic(driver, url, max_wait):
     result = {
         "URL": url,
-        "Website": "N/A",
+        "Website Name": "N/A",
         "Organic Traffic": "N/A",
-        "Traffic Value": "N/A",
-        "Top Country": "N/A",
-        "Top Country Share": "N/A",
-        "Top Keyword": "N/A",
-        "Keyword Position": "N/A",
-        "Top Keyword Traffic": "N/A",
+        "Traffic Worth": "N/A",
         "Status": "Failed",
         "Debug": ""
     }
@@ -165,96 +160,88 @@ def scrape_ahrefs_traffic(driver, url, max_wait):
             except:
                 result["Debug"] += " | Modal NOT found - page may not have loaded"
                 result["Status"] = "Modal not found"
-                
-                # Save screenshot for debugging (if needed)
-                # driver.save_screenshot(f"/tmp/debug_{url.replace('/', '_')}.png")
-                
                 return result
         
         # Give extra time for data to populate
-        time.sleep(2)
+        time.sleep(3)
         
-        # Try to find modal element
-        try:
-            modal = driver.find_element(By.CSS_SELECTOR, ".ReactModalPortal")
-        except:
+        # Helper function to safely extract text from exact XPath
+        def safe_text_xpath(xpath):
             try:
-                modal = driver.find_element(By.CSS_SELECTOR, "[class*='Modal']")
+                element = driver.find_element(By.XPATH, xpath)
+                text = element.text.strip()
+                return text if text else "N/A"
             except:
-                result["Debug"] += " | Could not locate modal element"
-                result["Status"] = "Modal element error"
-                return result
+                return "N/A"
         
-        # Helper function to safely extract text
-        def safe_text(selectors, element=modal):
-            """Try multiple selectors and return first match"""
-            for selector_type, selector_value in selectors:
+        # Extract Website Name using exact XPath
+        website_xpath = "/html/body/div[6]/div/div/div/div/div[1]/div/div[1]/p"
+        result["Website Name"] = safe_text_xpath(website_xpath)
+        
+        # If exact path fails, try fallback selectors
+        if result["Website Name"] == "N/A":
+            website_selectors = [
+                (By.CSS_SELECTOR, ".ReactModalPortal h2"),
+                (By.XPATH, "//div[contains(@class,'ReactModalPortal')]//h2"),
+                (By.XPATH, "//div[contains(@class,'ReactModalPortal')]//p[1]"),
+                (By.CSS_SELECTOR, ".ReactModalPortal p:first-of-type"),
+            ]
+            for selector_type, selector_value in website_selectors:
                 try:
-                    elem = element.find_element(selector_type, selector_value)
+                    elem = driver.find_element(selector_type, selector_value)
                     text = elem.text.strip()
                     if text:
-                        return text
+                        result["Website Name"] = text
+                        break
                 except:
                     continue
-            return "N/A"
         
-        # Extract Website Name
-        website_selectors = [
-            (By.CSS_SELECTOR, "h2"),
-            (By.XPATH, "//h2"),
-            (By.CSS_SELECTOR, "[class*='title']"),
-        ]
-        result["Website"] = safe_text(website_selectors)
+        # Extract Organic Traffic using exact XPath
+        traffic_xpath = "/html/body/div[6]/div/div/div/div/div[2]/div[1]/div[1]/div/div/div[1]/div[1]/div[2]/div/div/div/span"
+        result["Organic Traffic"] = safe_text_xpath(traffic_xpath)
         
-        # Extract Organic Traffic
-        traffic_selectors = [
-            (By.XPATH, "//div[contains(@class,'ReactModalPortal')]//span[contains(text(),'K') or contains(text(),'M') or contains(text(),'B')]"),
-            (By.CSS_SELECTOR, "span[class*='css-vemh4e']"),
-            (By.XPATH, "//span[contains(@class,'traffic') or contains(@class,'visits')]"),
-        ]
-        result["Organic Traffic"] = safe_text(traffic_selectors)
+        # If exact path fails, try fallback selectors
+        if result["Organic Traffic"] == "N/A":
+            traffic_selectors = [
+                (By.XPATH, "//div[contains(@class,'ReactModalPortal')]//span[contains(text(),'K') or contains(text(),'M') or contains(text(),'B')]"),
+                (By.CSS_SELECTOR, "span[class*='css-vemh4e']"),
+                (By.XPATH, "//span[contains(@class,'traffic') or contains(@class,'visits')]"),
+                (By.XPATH, "//div[1]/div[1]/div[2]/div[1]/div[1]/div[1]/div[2]/div/div/div/span"),
+            ]
+            for selector_type, selector_value in traffic_selectors:
+                try:
+                    elem = driver.find_element(selector_type, selector_value)
+                    text = elem.text.strip()
+                    if text and any(char in text for char in ['K', 'M', 'B', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9']):
+                        result["Organic Traffic"] = text
+                        break
+                except:
+                    continue
         
-        # Extract Traffic Value
-        value_selectors = [
-            (By.XPATH, "//span[starts-with(text(),'$')]"),
-            (By.CSS_SELECTOR, "span[class*='css-6s0ffe']"),
-            (By.XPATH, "//span[contains(text(),'$')]"),
-        ]
-        result["Traffic Value"] = safe_text(value_selectors)
+        # Extract Traffic Worth using exact XPath
+        worth_xpath = "/html/body/div[6]/div/div/div/div/div[2]/div[1]/div[1]/div/div/div[1]/div[2]/div[2]/div/div/div/span"
+        result["Traffic Worth"] = safe_text_xpath(worth_xpath)
         
-        # Extract Top Country
-        try:
-            country_table = modal.find_elements(By.CSS_SELECTOR, "table")
-            if len(country_table) > 0:
-                first_row = country_table[0].find_element(By.CSS_SELECTOR, "tr")
-                row_text = first_row.text.strip()
-                
-                # Parse: "Country Name 45.2%"
-                match = re.search(r'(.+?)\s+([\d.]+%)', row_text)
-                if match:
-                    result["Top Country"] = match.group(1).strip()
-                    result["Top Country Share"] = match.group(2)
-        except:
-            pass
-        
-        # Extract Top Keyword
-        try:
-            keyword_table = modal.find_elements(By.CSS_SELECTOR, "table")
-            if len(keyword_table) > 1:
-                first_row = keyword_table[1].find_element(By.CSS_SELECTOR, "tr")
-                row_text = first_row.text.strip()
-                
-                # Parse: "keyword 5 1.2K"
-                match = re.search(r'(.+?)\s+(\d+)\s+([\d,KM.]+)', row_text)
-                if match:
-                    result["Top Keyword"] = match.group(1).strip()
-                    result["Keyword Position"] = match.group(2)
-                    result["Top Keyword Traffic"] = match.group(3)
-        except:
-            pass
+        # If exact path fails, try fallback selectors
+        if result["Traffic Worth"] == "N/A":
+            worth_selectors = [
+                (By.XPATH, "//span[starts-with(text(),'$')]"),
+                (By.CSS_SELECTOR, "span[class*='css-6s0ffe']"),
+                (By.XPATH, "//span[contains(text(),'$')]"),
+                (By.XPATH, "//div[1]/div[1]/div[2]/div[1]/div[1]/div[2]/div[2]/div/div/div/span"),
+            ]
+            for selector_type, selector_value in worth_selectors:
+                try:
+                    elem = driver.find_element(selector_type, selector_value)
+                    text = elem.text.strip()
+                    if text and '$' in text:
+                        result["Traffic Worth"] = text
+                        break
+                except:
+                    continue
         
         # Check if we got meaningful data
-        if result["Organic Traffic"] != "N/A" or result["Website"] != "N/A":
+        if result["Organic Traffic"] != "N/A" or result["Website Name"] != "N/A":
             result["Status"] = "Success"
             result["Debug"] += " | Data extracted"
         else:
@@ -299,7 +286,7 @@ async def process_urls(urls, max_wait, headless, progress_callback=None):
 st.set_page_config(page_title="Ahrefs Traffic Bulk Checker", layout="centered")
 
 st.title("🔍 Ahrefs Traffic Checker – Bulk Extraction")
-st.caption("2026 Cloud Version • Enhanced Cloudflare Detection • Detailed Debug Info")
+st.caption("2026 Cloud Version • Enhanced Cloudflare Detection • Exact XPath Targeting")
 
 # Controls
 col1, col2, col3 = st.columns([3, 2, 2])
@@ -339,8 +326,11 @@ if uploaded_file is not None:
                 progress.progress(current / total)
                 status.markdown(f"**Progress:** {current}/{total} • **✓ Success:** {success_count} • **⏳ ETA:** ~{eta_min} min")
                 
-                # Show results table with all columns
+                # Show results table with only required columns
                 df_results = pd.DataFrame(current_results)
+                # Reorder columns for better display
+                column_order = ["URL", "Website Name", "Organic Traffic", "Traffic Worth", "Status", "Debug"]
+                df_results = df_results[column_order]
                 table.dataframe(df_results, use_container_width=True)
 
             results = asyncio.run(
@@ -360,6 +350,10 @@ if uploaded_file is not None:
 
             if results:
                 final_df = pd.DataFrame(results)
+                # Reorder columns for export
+                column_order = ["URL", "Website Name", "Organic Traffic", "Traffic Worth", "Status", "Debug"]
+                final_df = final_df[column_order]
+                
                 csv = final_df.to_csv(index=False).encode('utf-8')
                 st.download_button(
                     "⬇️ Download Results CSV",
@@ -387,4 +381,9 @@ st.markdown("""
 - **"Modal not found"**: Page didn't load properly, increase timeout
 - **"Blocked by Cloudflare"**: Strong anti-bot protection detected
 - Check the **Debug** column for specific error details
+
+### 📍 XPath Selectors Used:
+- **Website Name**: `/html/body/div[6]/div/div/div/div/div[1]/div/div[1]/p`
+- **Organic Traffic**: `/html/body/div[6]/div/div/div/div/div[2]/div[1]/div[1]/div/div/div[1]/div[1]/div[2]/div/div/div/span`
+- **Traffic Worth**: `/html/body/div[6]/div/div/div/div/div[2]/div[1]/div[1]/div/div/div[1]/div[2]/div[2]/div/div/div/span`
 """)
