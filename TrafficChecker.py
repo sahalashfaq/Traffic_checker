@@ -10,7 +10,7 @@ import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.common.exceptions import TimeoutException
 
 # ── Custom CSS Loader ────────────────────────────────────────────────────────
 def local_css(file_name):
@@ -21,14 +21,13 @@ def local_css(file_name):
         pass
 local_css("style.css")
 
-# ── Detect if on Streamlit Cloud ─────────────────────────────────────────────
+# ── Detect Streamlit Cloud ───────────────────────────────────────────────────
 is_cloud = os.environ.get("STREAMLIT_SERVER_ENABLE_STATIC_SERVING", False)
 
-# ── Driver Factory with auto + fallback versions ─────────────────────────────
+# ── Driver Factory ───────────────────────────────────────────────────────────
 def create_driver(headless_mode=True):
     options = uc.ChromeOptions()
     
-    # Essential for cloud / headless stability
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
@@ -38,7 +37,7 @@ def create_driver(headless_mode=True):
     options.add_argument("--disable-features=IsolateOrigins,site-per-process")
     options.add_argument("--allow-running-insecure-content")
     
-    # Recent realistic user agent (helps stealth)
+    # Current realistic UA (early 2026)
     options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
@@ -47,25 +46,28 @@ def create_driver(headless_mode=True):
     if is_cloud or headless_mode:
         options.add_argument("--headless=new")
     
-    driver = None
-    error_msgs = []
+    status_placeholder = st.empty()
+    status_placeholder.caption("Initializing browser... (auto-detect)")
     
-    # Step 1: Try auto-detection (usually best)
+    driver = None
+    
+    # Try 1: Auto-detect (recommended - no version_main)
     try:
         driver = uc.Chrome(options=options, use_subprocess=True)
         driver.implicitly_wait(10)
         if not (is_cloud or headless_mode):
             driver.maximize_window()
-        st.caption("✓ Driver started (auto-detected version)")
+        status_placeholder.caption("✓ Browser ready (auto-detected version)")
         return driver
     except Exception as e:
-        error_msgs.append(f"Auto-detect failed: {str(e)[:120]}")
+        status_placeholder.caption(f"Auto-detect failed: {str(e)[:120]} → trying fallbacks")
     
-    # Step 2: Try recent major versions in order (most likely → older)
+    # Fallback versions - order most likely first (adjust if needed after seeing logs)
     fallback_versions = [130, 129, 128, 127, 126, 125, 124]
     
     for ver in fallback_versions:
         try:
+            status_placeholder.caption(f"Trying Chrome major version {ver}...")
             driver = uc.Chrome(
                 version_main=ver,
                 options=options,
@@ -74,18 +76,16 @@ def create_driver(headless_mode=True):
             driver.implicitly_wait(10)
             if not (is_cloud or headless_mode):
                 driver.maximize_window()
-            st.caption(f"✓ Driver started using fallback Chrome major version {ver}")
+            status_placeholder.caption(f"✓ Success with fallback version {ver}")
             return driver
         except Exception as e:
-            error_msgs.append(f"Version {ver} failed: {str(e)[:100]}")
+            status_placeholder.caption(f"Version {ver} failed: {str(e)[:100]}")
     
-    # If everything failed → show all attempts
-    st.error("❌ Could not start ChromeDriver after multiple attempts")
-    for msg in error_msgs:
-        st.caption(msg)
-    raise RuntimeError("ChromeDriver initialization failed after all attempts")
+    # All attempts failed
+    status_placeholder.error("❌ Browser init failed after all attempts. Check logs / try later.")
+    raise RuntimeError("ChromeDriver could not be initialized")
 
-# ── Scraping function ────────────────────────────────────────────────────────
+# ── Scrape one URL ───────────────────────────────────────────────────────────
 def scrape_ahrefs_traffic(url, max_wait, headless):
     result = {
         "URL": url,
@@ -102,17 +102,17 @@ def scrape_ahrefs_traffic(url, max_wait, headless):
         
         full_url = f"https://ahrefs.com/traffic-checker/?input={url}&mode=subdomains"
         driver.get(full_url)
-        time.sleep(2.5 + random.uniform(0, 1.8))
+        time.sleep(3 + random.uniform(0, 2))
         
-        # Cloudflare check & wait
-        page_source_lower = driver.page_source.lower()
-        if any(phrase in page_source_lower for phrase in ["cloudflare", "just a moment", "checking your browser"]):
-            result["Debug"] = "Cloudflare → waiting up to 35s"
-            start = time.time()
+        # Cloudflare wait
+        page_lower = driver.page_source.lower()
+        if any(p in page_lower for p in ["cloudflare", "just a moment", "checking your browser"]):
+            result["Debug"] = "Cloudflare challenge detected → waiting"
+            start_cf = time.time()
             cleared = False
-            while time.time() - start < min(max_wait, 35):
+            while time.time() - start_cf < min(max_wait, 40):
                 try:
-                    if any(c['name'] == 'cf_clearance' for c in driver.get_cookies()):
+                    if any(c.get('name') == 'cf_clearance' for c in driver.get_cookies()):
                         cleared = True
                         break
                     if "cloudflare" not in driver.page_source.lower():
@@ -120,107 +120,107 @@ def scrape_ahrefs_traffic(url, max_wait, headless):
                         break
                 except:
                     pass
-                time.sleep(1.6)
-            result["Debug"] += " (cleared)" if cleared else " (NOT cleared)"
+                time.sleep(2)
+            result["Debug"] += " (cleared)" if cleared else " (failed)"
             if not cleared:
                 result["Status"] = "Blocked by Cloudflare"
                 return result
         
-        # Wait for results modal
+        # Wait for modal
         try:
             WebDriverWait(driver, max_wait).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, ".ReactModalPortal"))
             )
-            result["Debug"] += " | Modal found"
+            result["Debug"] += " | Modal appeared"
         except TimeoutException:
-            result["Debug"] += " | Modal NOT found"
-            result["Status"] = "Timeout - no modal"
+            result["Debug"] += " | No modal (timeout)"
+            result["Status"] = "Timeout"
             return result
         
-        time.sleep(2.2 + random.uniform(0, 1.8))
+        time.sleep(2.5 + random.uniform(0, 1.5))
         
-        # ── Extraction helpers ───────────────────────────────────────────────
-        def safe_text_xpath(xpath):
+        # Extraction helpers
+        def safe_xpath(xpath):
             try:
                 txt = driver.find_element(By.XPATH, xpath).text.strip()
                 return txt if txt else "N/A"
             except:
                 return "N/A"
         
-        # Website name
-        website = safe_text_xpath("/html/body/div[6]/div/div/div/div/div[1]/div/div[1]/p")
-        if website == "N/A":
-            for sel_type, sel_val in [
-                (By.CSS_SELECTOR, ".ReactModalPortal h2"),
-                (By.CSS_SELECTOR, ".ReactModalPortal p:first-of-type"),
-                (By.XPATH, "//div[contains(@class,'ReactModalPortal')]//p[1]"),
+        # Website Name
+        ws = safe_xpath("/html/body/div[6]/div/div/div/div/div[1]/div/div[1]/p")
+        if ws == "N/A":
+            for s in [
+                ".ReactModalPortal h2",
+                ".ReactModalPortal p:first-of-type",
+                "//div[contains(@class,'ReactModalPortal')]//p[1]",
             ]:
                 try:
-                    website = driver.find_element(sel_type, sel_val).text.strip()
-                    if website:
-                        break
+                    by = By.CSS_SELECTOR if s.startswith(".") else By.XPATH
+                    ws = driver.find_element(by, s).text.strip()
+                    if ws: break
                 except:
-                    continue
-        result["Website Name"] = website
+                    pass
+        result["Website Name"] = ws
         
-        # Organic traffic
-        traffic = safe_text_xpath("/html/body/div[6]/div/div/div/div/div[2]/div[1]/div[1]/div/div/div[1]/div[1]/div[2]/div/div/div/span")
-        if traffic == "N/A":
-            for sel_type, sel_val in [
-                (By.XPATH, "//span[contains(text(),'K') or contains(text(),'M') or contains(text(),'B')]"),
-                (By.CSS_SELECTOR, "span[class*='css-vemh4e']"),
+        # Organic Traffic
+        tr = safe_xpath("/html/body/div[6]/div/div/div/div/div[2]/div[1]/div[1]/div/div/div[1]/div[1]/div[2]/div/div/div/span")
+        if tr == "N/A":
+            for s in [
+                "//span[contains(text(),'K') or contains(text(),'M') or contains(text(),'B')]",
+                "span[class*='css-vemh4e']",
             ]:
                 try:
-                    txt = driver.find_element(sel_type, sel_val).text.strip()
+                    by = By.XPATH if s.startswith("//") else By.CSS_SELECTOR
+                    txt = driver.find_element(by, s).text.strip()
                     if txt and any(c in txt for c in "KMGB0123456789"):
-                        traffic = txt
+                        tr = txt
                         break
                 except:
-                    continue
-        result["Organic Traffic"] = traffic
+                    pass
+        result["Organic Traffic"] = tr
         
-        # Traffic worth
-        worth = safe_text_xpath("/html/body/div[6]/div/div/div/div/div[2]/div[1]/div[1]/div/div/div[1]/div[2]/div[2]/div/div/div/span")
-        if worth == "N/A":
-            for sel_type, sel_val in [
-                (By.XPATH, "//span[starts-with(text(),'$')]"),
-                (By.XPATH, "//span[contains(text(),'$')]"),
+        # Traffic Worth
+        wo = safe_xpath("/html/body/div[6]/div/div/div/div/div[2]/div[1]/div[1]/div/div/div[1]/div[2]/div[2]/div/div/div/span")
+        if wo == "N/A":
+            for s in [
+                "//span[starts-with(text(),'$')]",
+                "//span[contains(text(),'$')]",
             ]:
                 try:
-                    worth = driver.find_element(sel_type, sel_val).text.strip()
-                    if worth and '$' in worth:
-                        break
+                    by = By.XPATH
+                    wo = driver.find_element(by, s).text.strip()
+                    if wo and '$' in wo: break
                 except:
-                    continue
-        result["Traffic Worth"] = worth
+                    pass
+        result["Traffic Worth"] = wo
         
-        # Determine final status
-        if any(v != "N/A" for v in [result["Website Name"], result["Organic Traffic"], result["Traffic Worth"]]):
+        if any(v != "N/A" for v in [ws, tr, wo]):
             result["Status"] = "Success"
-            result["Debug"] += " | Data extracted"
+            result["Debug"] += " | Values extracted"
         else:
-            result["Status"] = "No data found"
-            result["Debug"] += " | Modal appeared but no values"
+            result["Status"] = "No data"
+            result["Debug"] += " | No values found"
     
     except Exception as e:
         result["Status"] = "Error"
-        result["Debug"] = f"Exception: {str(e)[:180]}"
+        result["Debug"] = f"Exception: {str(e)[:150]}"
     
     finally:
-        if driver is not None:
+        if driver:
             try:
                 driver.quit()
             except:
                 pass
-        time.sleep(0.7)  # breathing room after quit
+        time.sleep(1)  # extra breathing room
     
     return result
 
-# ── Batch processing ─────────────────────────────────────────────────────────
+# ── Batch processor ──────────────────────────────────────────────────────────
 async def process_urls(urls, max_wait, headless, progress_callback=None):
     results = []
     total = len(urls)
-    start_time = time.time()
+    start = time.time()
     
     for i, url in enumerate(urls):
         row = await asyncio.get_event_loop().run_in_executor(
@@ -229,97 +229,75 @@ async def process_urls(urls, max_wait, headless, progress_callback=None):
         results.append(row)
         
         processed = i + 1
-        elapsed = time.time() - start_time
-        eta_sec = (elapsed / processed) * (total - processed) if processed < total else 0
+        elapsed = time.time() - start
+        eta = (elapsed / processed) * (total - processed) if processed < total else 0
         
-        success_count = sum(1 for r in results if r["Status"] == "Success")
+        success = sum(1 for r in results if r["Status"] == "Success")
         
         if progress_callback:
-            progress_callback(processed, total, success_count, round(eta_sec / 60, 1), results)
+            progress_callback(processed, total, success, round(eta / 60, 1), results)
         
-        # Human-like delay between sessions
-        time.sleep(5 + random.uniform(0, 4))
+        time.sleep(6 + random.uniform(0, 5))  # generous delay
     
     return results
 
-# ── Streamlit UI ─────────────────────────────────────────────────────────────
+# ── UI ───────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Ahrefs Traffic Bulk Checker", layout="centered")
-st.title("🔍 Ahrefs Traffic Checker – Bulk Extraction")
-st.caption("2026 • Auto + Fallback Chrome • Per-URL Browser • Cloud Stable")
+st.title("🔍 Ahrefs Traffic Bulk Checker")
+st.caption("2026 • Auto + Fallback • Fresh Browser per URL • Cloud Hardened")
 
 col1, col2, col3 = st.columns([3, 2, 2])
 with col1:
-    uploaded_file = st.file_uploader("📁 Upload CSV / XLSX", type=["csv", "xlsx"])
+    uploaded_file = st.file_uploader("Upload CSV/XLSX", type=["csv", "xlsx"])
 with col2:
-    max_wait = st.number_input("⏱ Max wait per site (seconds)", 30, 180, 90, step=5)
+    max_wait = st.number_input("Max wait per URL (sec)", 40, 200, 100, 5)
 with col3:
-    headless = st.checkbox("🤖 Headless mode", value=True,
-                          help="Keep checked on Streamlit Cloud")
+    headless = st.checkbox("Headless mode", value=True, help="Required on Streamlit Cloud")
 
-if uploaded_file is not None:
+if uploaded_file:
     try:
-        if uploaded_file.name.endswith(".csv"):
-            df = pd.read_csv(uploaded_file)
-        else:
-            df = pd.read_excel(uploaded_file)
+        df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
+        url_col = st.selectbox("URL column", df.columns)
+        raw = df[url_col].dropna().unique()
+        urls = [str(u).strip() for u in raw if str(u).strip().startswith(("http", "www"))]
+        st.markdown(f"**{len(urls)} URLs ready**")
         
-        url_col = st.selectbox("Select column with URLs", df.columns)
-        raw_urls = df[url_col].dropna().unique()
-        urls = [str(u).strip() for u in raw_urls if str(u).strip().startswith(("http", "www."))]
-        
-        st.markdown(f"**Found {len(urls)} valid-looking URLs**")
-        
-        if st.button("▶️ Start Processing", type="primary"):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            results_table = st.empty()
+        if st.button("Start Processing", type="primary"):
+            progress = st.progress(0)
+            status = st.empty()
+            table = st.empty()
             
-            def update_ui(curr, tot, succ, eta_min, curr_results):
-                progress_bar.progress(curr / tot)
-                status_text.markdown(
-                    f"**Progress:** {curr}/{tot} • **Success:** {succ} • **ETA:** ~{eta_min} min"
-                )
-                df_view = pd.DataFrame(curr_results)[
-                    ["URL", "Website Name", "Organic Traffic", "Traffic Worth", "Status", "Debug"]
-                ]
-                results_table.dataframe(df_view, use_container_width=True)
+            def ui_update(curr, tot, succ, eta_min, res):
+                progress.progress(curr / tot)
+                status.markdown(f"**{curr}/{tot}** • Success: {succ} • ETA ~{eta_min} min")
+                df_show = pd.DataFrame(res)[["URL", "Website Name", "Organic Traffic", "Traffic Worth", "Status", "Debug"]]
+                table.dataframe(df_show, use_container_width=True)
             
-            with st.spinner("Processing (new browser instance per URL)..."):
-                results = asyncio.run(
-                    process_urls(urls, max_wait, headless, update_ui)
-                )
+            with st.spinner("Processing (one browser per site)..."):
+                results = asyncio.run(process_urls(urls, max_wait, headless, ui_update))
             
-            success_count = sum(1 for r in results if r["Status"] == "Success")
-            
-            if success_count > 0:
-                st.success(f"Finished — {success_count}/{len(results)} successful")
+            succ_count = sum(1 for r in results if r["Status"] == "Success")
+            if succ_count > 0:
+                st.success(f"Done! {succ_count}/{len(results)} successful")
             else:
-                st.warning("No successful extractions — check Debug column")
+                st.warning("No successes — see Debug column (Cloudflare / version issues?)")
             
-            final_df = pd.DataFrame(results)[
-                ["URL", "Website Name", "Organic Traffic", "Traffic Worth", "Status", "Debug"]
-            ]
+            final_df = pd.DataFrame(results)[["URL", "Website Name", "Organic Traffic", "Traffic Worth", "Status", "Debug"]]
+            csv = final_df.to_csv(index=False).encode('utf-8')
+            st.download_button("Download CSV", csv, f"ahrefs_{time.strftime('%Y%m%d_%H%M')}.csv", "text/csv")
             
-            csv_bytes = final_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="⬇️ Download Results as CSV",
-                data=csv_bytes,
-                file_name=f"ahrefs_traffic_{time.strftime('%Y%m%d_%H%M')}.csv",
-                mime="text/csv"
-            )
-            
-            st.markdown("### Status Summary")
+            st.markdown("### Summary")
             st.dataframe(final_df["Status"].value_counts(), use_container_width=True)
     
     except Exception as e:
-        st.error(f"Error reading file: {str(e)}")
-        with st.expander("Full traceback"):
-            st.code(traceback.format_exc())
+        st.error(f"File error: {str(e)}")
+        st.code(traceback.format_exc())
 
 st.markdown("---")
 st.caption("""
 Tips:
-• Try 80–120 seconds wait time if you see many Cloudflare blocks
-• Start with 5–10 URLs to test stability
-• If still failing → look at the version error messages in UI
+• Use 100–150 sec wait if many Cloudflare blocks
+• Test with 3–8 URLs first
+• If init keeps failing → look at the status messages (which version worked/failed)
+• Consider adding packages.txt in repo root: chromium\nchromium-driver
 """)
